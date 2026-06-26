@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import pandas as pd
 import requests
@@ -6,254 +5,201 @@ from datetime import datetime, timedelta
 import time
 
 # 1. 網頁全域設定
-st.set_page_config(page_title="臨玖 - 雙大盤智能量化搜尋終端", layout="wide")
+st.set_page_config(page_title="臨玖 - 雙大腦智能量化搜尋端", layout="wide")
 
 # 2. 安全調用 Secrets 密碼箱
 try:
     ALPACA_API_KEY = st.secrets["ALPACA_API_KEY"]
     ALPACA_SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
 except KeyError:
-    st.error("❌ 密碼箱 (Secrets) 中找不到 Alpaca 憑證！請先前往 Streamlit 設定好金鑰。")
+    st.error("❌ 密碼箱 (Secrets) 中找不到 Alpaca 憑證！請先前往 Streamlit 後台設定金鑰。")
     st.stop()
 
-# 🌟 升級核心一：Wikipedia 爬取防線，加入 80 隻超級龍頭備用名單，防範雲端 IP 阻擋
-FALLBACK_SP500 = [
-    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "LLY", "V", "UNH", 
-    "AVGO", "XOM", "JPM", "WMT", "MA", "PG", "HD", "MRK", "CVX", "COST", 
-    "PEP", "KO", "ADBE", "ORCL", "BAC", "MCD", "CRM", "AMD", "NFLX", "TMO", 
-    "ABT", "CSCO", "DIS", "ACN", "PM", "INTC", "CMCSA", "VZ", "ADX", "QCOM"
-]
+# 核心自訂監控名單 (自動化雷達焦點)
+FOCUS_TICKERS = ["NVDA", "SMCI", "AMD", "AMZN", "MSFT", "AAPL", "GOOGL", "META", "TSLA", "AVGO"]
 
-FALLBACK_NASDAQ100 = [
-    "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "TSLA", "AVGO", "COST", "PEP",
-    "CSCO", "AMD", "TMUS", "CMCSA", "NFLX", "ADBE", "INTC", "TXN", "AMGN", "QCOM",
-    "HON", "INTU", "AMAT", "SBUX", "BKNG", "ISRG", "MDLZ", "GILD", "LRCX", "REGN",
-    "ADP", "VRTX", "MU", "ADI", "PANW", "SNPS", "CDNS", "ASML", "KLAC", "MELI"
-]
-
-@st.cache_data(ttl=86400)  # 一天只從網上同步一次
-def get_market_tickers():
-    # A. 嘗試爬取標普 500
-    sp500 = []
-    try:
-        url_sp = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        sp500 = pd.read_html(url_sp)[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
-    except Exception:
-        sp500 = FALLBACK_SP500
-
-    # B. 嘗試爬取納斯達克 100
-    nasdaq100 = []
-    try:
-        url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
-        tables = pd.read_html(url_ndx)
-        for df in tables:
-            if 'Ticker' in df.columns:
-                nasdaq100 = df['Ticker'].str.replace('.', '-', regex=False).tolist()
-                break
-            elif 'Symbol' in df.columns:
-                nasdaq100 = df['Symbol'].str.replace('.', '-', regex=False).tolist()
-                break
-    except Exception:
-        nasdaq100 = FALLBACK_NASDAQ100
-
-    # 防禦機制：確保名單不為空
-    if not sp500: sp500 = FALLBACK_SP500
-    if not nasdaq100: nasdaq100 = FALLBACK_NASDAQ100
-
-    return sp500, nasdaq100
-
-# 輔助函數：火箭動能等級
-def get_rocket_emoji(rs):
-    if rs >= 85: return "🚀🚀🚀"
-    if rs >= 70: return "🚀🚀"
-    return "🚀"
-
-# 3. 核心量化計算邏輯
-def calculate_metrics(ticker, bars):
-    if len(bars) < 140:  # 下調至 140 日，容錯部分新上市或短交易歷史股票
-        return None
-    df = pd.DataFrame(bars)
-    df['close'] = df['c']
-    current_price = df['close'].iloc[-1]
-    
-    # 計算半年期 (126個交易日) 漲跌幅動能
-    price_6mo_ago = df['close'].iloc[-126] if len(df) >= 126 else df['close'].iloc[0]
-    half_year_perf = ((current_price - price_6mo_ago) / price_6mo_ago) * 100
-    
-    # 換算相對強度 (RS) 評分
-    rs_rating = min(max(int(50 + half_year_perf), 10), 99)
-    
-    return {
-        "股票代號": ticker,
-        "最新現價 ($)": round(current_price, 2),
-        "相對強度 (RS 分數)": rs_rating,
-        "三級火箭動能": get_rocket_emoji(rs_rating)
+# 3. Alpaca實時大數據提取函數 (含拆股修正)
+def fetch_alpaca_bars(symbols, days_back=365):
+    """
+    從 Alpaca API 抓取歷史 K 線數據
+    自動加入 adjustment=all 修正所有股票拆股(Split)帶來的價格誤差
+    """
+    url = "https://data.alpaca.markets/v2/stocks/bars"
+    headers = {
+        "Apca-Api-Key-Id": ALPACA_API_KEY,
+        "Apca-Api-Secret-Key": ALPACA_SECRET_KEY
     }
-
-# 🌟 核心優化二：全大盤大數據計算 (加入 limit: 10000 避免 Alpaca 數據被切斷)
-@st.cache_data(ttl=300)
-def load_and_calculate_master_data(tickers):
-    data_url = "https://data.alpaca.markets/v2/stocks/bars"
-    headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
-    all_bars = {}
-    chunk_size = 40  # 縮小分批大小，完美對齊 IEX API 10000 限制
     
-    # 220 日曆天約等於 150 個交易日
-    start_date = (datetime.now() - timedelta(days=220)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00Z")
     
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i:i+chunk_size]
-        params = {
-            "symbols": ",".join(chunk),
-            "timeframe": "1Day",
-            "start": start_date,
-            "feed": "iex",
-            "adjustment": "all",
-            "limit": 10000  # ✨ 關鍵修復：解除預設 1000 條截斷限制！
-        }
-        try:
-            response = requests.get(data_url, headers=headers, params=params)
-            if response.status_code == 200:
-                bars_data = response.json().get("bars", {})
-                if bars_data:
-                    all_bars.update(bars_data)
-            time.sleep(0.12)  # 免費密鑰安全延遲
-        except Exception:
-            continue
-
-    results = []
-    for ticker, bars in all_bars.items():
-        metrics = calculate_metrics(ticker, bars)
-        if metrics:
-            results.append(metrics)
-    return pd.DataFrame(results)
-
-# 獨立高速通道：手動搜尋對比圖專用 (快取 5 分鐘)
-@st.cache_data(ttl=300)
-def fetch_ticker_and_spy_history(ticker):
-    data_url = "https://data.alpaca.markets/v2/stocks/bars"
-    headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
     params = {
-        "symbols": f"{ticker},SPY",
+        "symbols": ",".join(symbols),
         "timeframe": "1Day",
-        "start": (datetime.now() - timedelta(days=220)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "feed": "iex",
-        "adjustment": "all",
-        "limit": 10000
+        "start": start_date,
+        "adjustment": "all",  # 核心：自動校正如 SMCI 等股票拆股後的真實歷史價格
+        "feed": "sip"
     }
+    
     try:
-        response = requests.get(data_url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
             return response.json().get("bars", {})
-    except Exception:
-        return None
-    return None
-
-# 5. 【左側側邊欄】雷達導航中心
-st.sidebar.title("🤖 雷達導航中心")
-st.sidebar.markdown("---")
-
-# 實時強制手動刷新按鈕
-st.sidebar.subheader("🔄 數據更新中心")
-if st.sidebar.button("⚡ 實時強制刷新股價", use_container_width=True):
-    st.cache_data.clear()  # 瞬間清空快取
-    st.success("✅ 已同步最新股價！")
-    st.rerun()             # 重新運行程式
-
-st.sidebar.markdown("---")
-
-# A. 手動搜尋框
-st.sidebar.subheader("🔍 個股即時診斷 & 大盤對比")
-search_input = st.sidebar.text_input("輸入美股代碼 (例如: TSM, NVDA)", "").strip().upper()
-
-st.sidebar.markdown("---")
-
-# B. 掃描目標大盤選擇器
-st.sidebar.subheader("⚙️ 掃描大盤配置")
-market_target = st.sidebar.selectbox(
-    "選擇觀測大盤群組",
-    ["Nasdaq 100 (科技龍頭股)", "S&P 500 (標普五百大盤)", "兩大指數合體聯軍 (全明星大池)"]
-)
-
-# C. RS 分數滑桿
-rs_score_min = st.sidebar.slider("最低相對強度 (RS) 分數", 10, 99, 85)
-
-st.sidebar.markdown("---")
-st.sidebar.caption("數據源：Wikipedia Tickers + Alpaca IEX Free")
-
-
-# 6. 【右側主畫面】分層渲染
-st.title("📈 臨玖量化雷達終端機")
-
-# 同步下載大盤名單數據
-with st.spinner("🔄 正在網絡同步最新美股大盤成分股名單..."):
-    sp500_tickers, nasdaq_tickers = get_market_tickers()
-
-# 根據選單動態決定當前的股票池
-if market_target == "Nasdaq 100 (科技龍頭股)":
-    current_pool = nasdaq_tickers
-    display_title = "Nasdaq 100 強勢股實時掃描器"
-elif market_target == "S&P 500 (標普五百大盤)":
-    current_pool = sp500_tickers
-    display_title = "S&P 500 強勢股實時掃描器"
-else:
-    current_pool = list(set(sp500_tickers + nasdaq_tickers))
-    display_title = "S&P 500 + Nasdaq 100 全明星聯軍掃描器"
-
-
-# ==================== 區塊一：個股即時搜尋結果 + TradingView 對比圖 ====================
-if search_input:
-    st.markdown(f"### 🔍 手動搜尋個股結果：`{search_input}`")
-    
-    with st.spinner(f"🚀 正在穿透交易所，提取 `{search_input}` 與大盤的實時對比數據..."):
-        history_bars = fetch_ticker_and_spy_history(search_input)
-        
-    if history_bars and search_input in history_bars:
-        # ✨ 關鍵修復：這裡直接調用原來的 calculate_metrics，不進行覆蓋污染！
-        single_metrics = calculate_metrics(search_input, history_bars[search_input])
-        if single_metrics:
-            st.success(f"🎯 成功獲取 `{search_input}` 量化診斷報告：")
-            st.dataframe(pd.DataFrame([single_metrics]), use_container_width=True, hide_index=True)
-            
-            if "SPY" in history_bars:
-                df_stock = pd.DataFrame(history_bars[search_input])
-                df_spy = pd.DataFrame(history_bars["SPY"])
-                
-                df_stock['日期'] = pd.to_datetime(df_stock['t']).dt.date
-                df_spy['日期'] = pd.to_datetime(df_spy['t']).dt.date
-                
-                df_stock = df_stock.set_index('日期')[['c']].rename(columns={'c': f"{search_input} (個股)"})
-                df_spy = df_spy.set_index('日期')[['c']].rename(columns={'c': "S&P 500 (SPY 大盤)"})
-                
-                df_compare = df_stock.join(df_spy, how='inner')
-                if not df_compare.empty:
-                    df_compare_pct = ((df_compare / df_compare.iloc[0]) - 1) * 100
-                    st.markdown(f"#### 📊 TradingView 模式：`{search_input}` vs S&P 500 累計回報對比圖 (歷史 250 天)")
-                    st.line_chart(df_compare_pct, use_container_width=True)
         else:
-            st.error(f"❌ 股票 `{search_input}` 歷史數據不足，無法運算。")
-    else:
-        st.error(f"❌ 無法在交易所中尋獲 `{search_input}`。請檢查代號是否正確。")
-    st.markdown("---")
+            st.sidebar.error(f"Alpaca API 報錯: {response.status_code}")
+            return {}
+    except Exception as e:
+        st.sidebar.error(f"網絡連接失敗: {str(e)}")
+        return {}
 
-
-# ==================== 區塊二：動態大盤強勢股掃描器表格 ====================
-st.markdown(f"### 📊 {display_title}")
-
-with st.spinner(f"🤖 正在實時計算該板塊 {len(current_pool)} 隻股票的量化大數據..."):
-    master_df = load_and_calculate_master_data(current_pool)
-
-if not master_df.empty:
-    # 執行強度過濾
-    filtered_df = master_df[master_df["相對強度 (RS 分數)"] >= rs_score_min]
+# 4. Stan Weinstein 階段與 RS 分數核心算法
+def analyze_weinstein_stage(df):
+    if df.empty or len(df) < 200:
+        return {"stage": "數據不足", "color": "gray", "rs": 50, "ma150": 0, "ma200": 0}
     
-    if not filtered_df.empty:
-        filtered_df = filtered_df.sort_values(by="相對強度 (RS 分數)", ascending=False)
-        st.success(f"🎉 瞬間掃描完畢！當前符合 RS 分數 ≧ {rs_score_min} 嘅強勢股票共有 {len(filtered_df)} 隻：")
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    # 計算 150MA 與 200MA
+    df['150MA'] = df['c'].rolling(window=150).mean()
+    df['200MA'] = df['c'].rolling(window=200).mean()
+    
+    current_price = df['c'].iloc[-1]
+    ma150_curr = df['150MA'].iloc[-1]
+    ma200_curr = df['200MA'].iloc[-1]
+    ma200_prev = df['200MA'].iloc[-20] if len(df) > 20 else df['200MA'].iloc[0] # 20天前的200MA
+    
+    # 半年期相對強度 (RS 分數基準)
+    price_6mo_ago = df['c'].iloc[-126] if len(df) >= 126 else df['c'].iloc[0]
+    half_year_perf = ((current_price - price_6mo_ago) / price_6mo_ago) * 100
+    rs_rating = min(max(int(50 + half_year_perf), 10), 99)
+    
+    # Stan Weinstein 四階段判斷邏輯
+    # 第二階段 (多頭主升浪)：價格 > 150MA > 200MA，且 200MA 向上揚
+    if current_price > ma150_curr and ma150_curr > ma200_curr and ma200_curr > ma200_prev:
+        stage = "第 2 階段 (🚀 強勢主升浪)"
+        color = "green"
+    # 第四階段 (空頭下跌浪)：價格 < 150MA < 200MA
+    elif current_price < ma150_curr and ma150_curr < ma200_curr:
+        stage = "第 4 階段 (⚠️ 空頭清算浪)"
+        color = "red"
+    # 第一階段 (底部築底) 或 第三階段 (高檔盤整)
     else:
-        st.info(f"⚠️ 當前選定大盤中，暫時沒有股票達到 {rs_score_min} 分。可嘗試在左側將分數調低。")
-else:
-    st.warning("⚠️ 大數據加載失敗，請檢查網絡連線或密鑰。")
+        if ma200_curr > ma200_prev:
+            stage = "第 3 階段 (🔄 高位做頭/震盪)"
+            color = "orange"
+        else:
+            stage = "第 1 階段 (💤 底部打底蓄勢)"
+            color = "blue"
+            
+    return {
+        "stage": stage,
+        "color": color,
+        "rs": rs_rating,
+        "ma150": round(ma150_curr, 2),
+        "ma200": round(ma200_curr, 2),
+        "current_price": round(current_price, 2)
+    }
 
-```
+# 5. 🚀 側邊欄控制中心
+st.sidebar.title("🎛️ 雙大腦導航中心")
+st.sidebar.markdown("---")
+
+# 手動搜尋輸入
+search_input = st.sidebar.text_input("🔍 實時個股穿透分析 (輸入代號):", "").strip().upper()
+
+# 門檻篩選
+min_rs = st.sidebar.slider("🎯 核心雷達最低 RS 門檻", 10, 99, 70)
+
+if st.sidebar.button("🔄 刷新大數據庫", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+# 6. 主畫面排版
+st.title("📊 臨玖 - 雙大腦智能量化搜尋端")
+st.caption("即時串接 Alpaca 數據庫 • Stan Weinstein 階段突破識別系統")
+
+# 邏輯分流 A：如果使用者有手動輸入搜尋特定股票
+if search_input:
+    st.header(f"🔍 個股全視角穿透：{search_input}")
+    
+    with st.spinner(f"正在向 Alpaca 調取 {search_input} 經拆股調整後的最新數據..."):
+        raw_data = fetch_alpaca_bars([search_input], days_back=365)
+        
+        if search_input in raw_data and len(raw_data[search_input]) > 0:
+            # 轉換為 DataFrame
+            df_stock = pd.DataFrame(raw_data[search_input])
+            df_stock['t'] = pd.to_datetime(df_stock['t'])
+            df_stock.set_index('t', inplace=True)
+            
+            # 計算指標
+            analysis = analyze_weinstein_stage(df_stock)
+            
+            # 儀表板數據顯示
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("最新實時價", f"${analysis['current_price']}")
+            col2.metric(" Weinstein 階段", analysis['stage'])
+            col3.metric("相對強度 (RS Score)", f"{analysis['rs']} 分")
+            col4.metric("150MA / 200MA", f"${analysis['ma150']} / ${analysis['ma200']}")
+            
+            st.markdown("---")
+            st.subheader("📈 Stan Weinstein 趨勢對照圖 (日K線與移動平均線)")
+            
+            # 建立圖表畫布數據
+            df_stock['150MA'] = df_stock['c'].rolling(window=150).mean()
+            df_stock['200MA'] = df_stock['c'].rolling(window=200).mean()
+            
+            chart_df = df_stock[['c', '150MA', '200MA']].rename(columns={
+                'c': '收盤價 (Split-adjusted)',
+                '150MA': '150日 趨勢線',
+                '200MA': '200日 生命線'
+            })
+            
+            # 繪製趨勢圖
+            st.line_chart(chart_df, height=400)
+            
+            # 突破訊號文字提示
+            if df_stock['c'].iloc[-1] > df_stock['150MA'].iloc[-1] and df_stock['c'].iloc[-2] <= df_stock['150MA'].iloc[-2]:
+                st.success(f"🚀 【突破訊號】{search_input} 今日成功帶量向上突破 150日趨勢線，密切留意 VCP 型態是否完成！")
+                
+        else:
+            st.error(f"❌ 未能從 Alpaca 獲取到 {search_input} 的數據，請檢查代號是否正確。")
+
+# 邏輯分流 B：預設主畫面的自動化大數據雷達
+else:
+    st.header("⚡ 核心量化梯隊自動監達 (科技/半導體焦點)")
+    
+    with st.spinner("自動化全天候掃描焦點股池中..."):
+        all_bars = fetch_alpaca_bars(FOCUS_TICKERS, days_back=365)
+        
+        radar_results = []
+        for ticker in FOCUS_TICKERS:
+            if ticker in all_bars and len(all_bars[ticker]) > 0:
+                df_t = pd.DataFrame(all_bars[ticker])
+                analysis = analyze_weinstein_stage(df_t)
+                
+                # 動態火箭符號
+                rockets = "🚀🚀🚀" if analysis['rs'] >= 90 else ("🚀🚀" if analysis['rs'] >= 70 else "🔹")
+                
+                radar_results.append({
+                    "代號": ticker,
+                    "最新價格 ($)": analysis['current_price'],
+                    "Weinstein 階段": analysis['stage'],
+                    "相對強度 (RS 分數)": analysis['rs'],
+                    "動能強度": rockets,
+                    "150MA": analysis['ma150'],
+                    "200MA": analysis['ma200']
+                })
+        
+        if radar_results:
+            df_radar = pd.DataFrame(radar_results)
+            
+            # 過濾滿足使用者設定的最低 RS 分數
+            filtered_radar = df_radar[df_radar["相對強度 (RS 分數)"] >= min_rs]
+            filtered_radar = filtered_radar.sort_values(by="相對強度 (RS 分數)", ascending=False)
+            
+            st.success(f"🎯 自動掃描完成！目前共有 {len(filtered_radar)} 隻股票符合最低 RS >= {min_rs} 門檻：")
+            st.dataframe(filtered_radar, use_container_width=True, hide_index=True)
+            
+            # 額外分組提示：直接挑出 Stage 2 的股票
+            stage2_stocks = filtered_radar[filtered_radar["Weinstein 階段"].str.contains("2")]
+            if not stage2_stocks.empty:
+                st.info(f"💡 臨玖小提示：目前處於 **第二階段（強勢主升浪）** 且符合門檻的標的有：{', '.join(stage2_stocks['代號'].tolist())}。入選 Weinstein 系統核心觀察範圍。")
+        else:
+            st.warning("⚠️ 暫時無法從 API 獲取任何股池數據，請確認後台 Secret 金鑰是否正確填寫。")
