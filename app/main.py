@@ -16,18 +16,32 @@ except KeyError:
     st.error("❌ 密碼箱 (Secrets) 中找不到 Alpaca 憑證！請先前往 Streamlit 設定好金鑰。")
     st.stop()
 
-# 3. 全自動獲取標普 500 與納指 100 成分股清單
-@st.cache_data(ttl=86400)  # 股票名單一天只從 Wikipedia 同步一次
+# 🌟 升級核心一：Wikipedia 爬取防線，加入 80 隻超級龍頭備用名單，防範雲端 IP 阻擋
+FALLBACK_SP500 = [
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "LLY", "V", "UNH", 
+    "AVGO", "XOM", "JPM", "WMT", "MA", "PG", "HD", "MRK", "CVX", "COST", 
+    "PEP", "KO", "ADBE", "ORCL", "BAC", "MCD", "CRM", "AMD", "NFLX", "TMO", 
+    "ABT", "CSCO", "DIS", "ACN", "PM", "INTC", "CMCSA", "VZ", "ADX", "QCOM"
+]
+
+FALLBACK_NASDAQ100 = [
+    "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "TSLA", "AVGO", "COST", "PEP",
+    "CSCO", "AMD", "TMUS", "CMCSA", "NFLX", "ADBE", "INTC", "TXN", "AMGN", "QCOM",
+    "HON", "INTU", "AMAT", "SBUX", "BKNG", "ISRG", "MDLZ", "GILD", "LRCX", "REGN",
+    "ADP", "VRTX", "MU", "ADI", "PANW", "SNPS", "CDNS", "ASML", "KLAC", "MELI"
+]
+
+@st.cache_data(ttl=86400)  # 一天只從網上同步一次
 def get_market_tickers():
-    # A. 爬取標普 500
+    # A. 嘗試爬取標普 500
     sp500 = []
     try:
         url_sp = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         sp500 = pd.read_html(url_sp)[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
-    except Exception as e:
-        sp500 = ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA"]
+    except Exception:
+        sp500 = FALLBACK_SP500
 
-    # B. 爬取納斯達克 100
+    # B. 嘗試爬取納斯達克 100
     nasdaq100 = []
     try:
         url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
@@ -39,8 +53,12 @@ def get_market_tickers():
             elif 'Symbol' in df.columns:
                 nasdaq100 = df['Symbol'].str.replace('.', '-', regex=False).tolist()
                 break
-    except Exception as e:
-        nasdaq100 = ["NVDA", "AMD", "AVGO", "SMCI", "NFLX", "COST", "TSM", "ARM"]
+    except Exception:
+        nasdaq100 = FALLBACK_NASDAQ100
+
+    # 防禦機制：確保名單不為空
+    if not sp500: sp500 = FALLBACK_SP500
+    if not nasdaq100: nasdaq100 = FALLBACK_NASDAQ100
 
     return sp500, nasdaq100
 
@@ -50,9 +68,9 @@ def get_rocket_emoji(rs):
     if rs >= 70: return "🚀🚀"
     return "🚀"
 
-# 4. 核心量化計算邏輯
+# 3. 核心量化計算邏輯
 def calculate_metrics(ticker, bars):
-    if len(bars) < 150:
+    if len(bars) < 140:  # 下調至 140 日，容錯部分新上市或短交易歷史股票
         return None
     df = pd.DataFrame(bars)
     df['close'] = df['c']
@@ -72,22 +90,26 @@ def calculate_metrics(ticker, bars):
         "三級火箭動能": get_rocket_emoji(rs_rating)
     }
 
-# 🌟 效能與即時平衡優化：全大盤大數據計算 (快取設定為 5 分鐘，確保自動更新股價)
+# 🌟 核心優化二：全大盤大數據計算 (加入 limit: 10000 避免 Alpaca 數據被切斷)
 @st.cache_data(ttl=300)
 def load_and_calculate_master_data(tickers):
     data_url = "https://data.alpaca.markets/v2/stocks/bars"
     headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
     all_bars = {}
-    chunk_size = 100
+    chunk_size = 40  # 縮小分批大小，完美對齊 IEX API 10000 限制
+    
+    # 220 日曆天約等於 150 個交易日
+    start_date = (datetime.now() - timedelta(days=220)).strftime("%Y-%m-%dT%H:%M:%SZ")
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
         params = {
             "symbols": ",".join(chunk),
             "timeframe": "1Day",
-            "start": (datetime.now() - timedelta(days=250)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "start": start_date,
             "feed": "iex",
-            "adjustment": "all"
+            "adjustment": "all",
+            "limit": 10000  # ✨ 關鍵修復：解除預設 1000 條截斷限制！
         }
         try:
             response = requests.get(data_url, headers=headers, params=params)
@@ -95,7 +117,7 @@ def load_and_calculate_master_data(tickers):
                 bars_data = response.json().get("bars", {})
                 if bars_data:
                     all_bars.update(bars_data)
-            time.sleep(0.15)  # 免費密鑰安全延遲
+            time.sleep(0.12)  # 免費密鑰安全延遲
         except Exception:
             continue
 
@@ -114,9 +136,10 @@ def fetch_ticker_and_spy_history(ticker):
     params = {
         "symbols": f"{ticker},SPY",
         "timeframe": "1Day",
-        "start": (datetime.now() - timedelta(days=250)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "start": (datetime.now() - timedelta(days=220)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "feed": "iex",
-        "adjustment": "all"
+        "adjustment": "all",
+        "limit": 10000
     }
     try:
         response = requests.get(data_url, headers=headers, params=params)
@@ -130,11 +153,11 @@ def fetch_ticker_and_spy_history(ticker):
 st.sidebar.title("🤖 雷達導航中心")
 st.sidebar.markdown("---")
 
-# 🌟 核心新增一：實時強制手動刷新按鈕 (一按即時清空快取並重新加載最新股價)
+# 實時強制手動刷新按鈕
 st.sidebar.subheader("🔄 數據更新中心")
 if st.sidebar.button("⚡ 實時強制刷新股價", use_container_width=True):
-    st.cache_data.clear()  # 瞬間拔掉快取地雷
-    st.success("✅ 已強制同步最新股價！")
+    st.cache_data.clear()  # 瞬間清空快取
+    st.success("✅ 已同步最新股價！")
     st.rerun()             # 重新運行程式
 
 st.sidebar.markdown("---")
@@ -174,7 +197,6 @@ elif market_target == "S&P 500 (標普五百大盤)":
     current_pool = sp500_tickers
     display_title = "S&P 500 強勢股實時掃描器"
 else:
-    # 兩大指數聯軍：合體並全自動去重疊 (Set Union)
     current_pool = list(set(sp500_tickers + nasdaq_tickers))
     display_title = "S&P 500 + Nasdaq 100 全明星聯軍掃描器"
 
@@ -187,6 +209,7 @@ if search_input:
         history_bars = fetch_ticker_and_spy_history(search_input)
         
     if history_bars and search_input in history_bars:
+        # ✨ 關鍵修復：這裡直接調用原來的 calculate_metrics，不進行覆蓋污染！
         single_metrics = calculate_metrics(search_input, history_bars[search_input])
         if single_metrics:
             st.success(f"🎯 成功獲取 `{search_input}` 量化診斷報告：")
@@ -232,5 +255,5 @@ if not master_df.empty:
         st.info(f"⚠️ 當前選定大盤中，暫時沒有股票達到 {rs_score_min} 分。可嘗試在左側將分數調低。")
 else:
     st.warning("⚠️ 大數據加載失敗，請檢查網絡連線或密鑰。")
- 
+
 ```
