@@ -42,41 +42,44 @@ WATCH_LIST = ["NVDA", "AMD", "SMCI", "AMZN", "AAPL", "MSFT", "GOOGL", "META", "T
 # 5. 全自動對接 Alpaca 數據核心函數
 @st.cache_data(ttl=3600)  # 快取 1 小時，避免頻繁刷網頁重複調用 API
 def fetch_market_data(tickers):
-    # 使用 Alpaca 官方標準 Data v2 終端點
-    data_url = "https://data.alpaca.markets/v2/stocks/bars"
-    headers = {
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY
-    }
-    
-    # 抓取過去大約 250 天的日 K 線，用作精準計算 150日線 (30週線)
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=250)
-    
-    params = {
-        "symbols": ",".join(tickers),
-        "timeframe": "1Day",
-        "start": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end": end_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "limit": 1000,
-        "adjustment": "all"
-    }
-    
-    response = requests.get(data_url, headers=headers, params=params)
-    
-    if response.status_code == 401:
-        st.error("❌ Alpaca 驗證失敗 (401 Unauthorized)！請確認 Secrets 中的金鑰配對是否正確，或是否不小心複製到了空格。")
-        st.stop()
-    elif response.status_code != 200:
-        st.error(f"❌ 數據提取失敗。狀態碼: {response.status_code}，錯誤訊息: {response.text}")
-        st.stop()
+    @st.cache_data(ttl=3600)
+    def fetch_market_data_at_tickers():
+        data_url = "https://data.alpaca.markets/v2/stocks/bars"
+        headers = {
+            "APCA-API-KEY-ID": ALPACA_API_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY
+        }
         
-    return response.json().get("bars", {})
-
-# 6. 執行大數據掃描與量化計算
-with st.spinner("🤖 正在穿透 Alpaca 交易所，實時計算強勢股數據..."):
-    all_bars = fetch_market_data(WATCH_LIST)
-
+        # 抓取最近 250 天的 K 線，用來計算 150 日線 (50周線)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=250)
+        
+        params = {
+            "symbols": ",".join(tickers),
+            "timeframe": "1D",         # ✨ 修正：Alpaca 官方格式是 "1D"，不是 "1Day"
+            "feed": "iex",             # ✨ 修正：模擬盤 (Paper Key) 必須指定 iex 免費數據源，否則會被 403 拒絕
+            "start": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": end_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "limit": 1000,
+            "adjustment": "all"
+        }
+        
+        try:
+            response = requests.get(data_url, headers=headers, params=params)
+            
+            if response.status_code == 401:
+                st.error("❌ 🔑 Alpaca 驗證失敗 (401 Unauthorized)！請確認 Secrets 中的金鑰配置是否正確。")
+                st.stop()
+            elif response.status_code != 200:
+                st.error(f"❌ 錯誤：無法獲取市場數據，狀態碼 {response.status_code}，錯誤訊息：{response.text}")
+                return {}              # ✨ 修正：失敗時返回空字典 {}，避免主程式 .items() 崩潰卡死
+                
+            return response.json().get("bars", {})
+        except Exception as e:
+            st.error(f"❌ 網路連線異常：{str(e)}")
+            return {}
+        
+    return fetch_market_data_at_tickers()
 if not all_bars:
     st.warning("⚠️ 未能成功取得股票數據，請確認美股是否處於常規交易時間段或代碼正確性。")
 else:
