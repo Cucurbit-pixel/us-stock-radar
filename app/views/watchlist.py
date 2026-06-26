@@ -16,7 +16,7 @@ def fetch_nasdaq100_tickers():
         return df_tickers['Ticker'].tolist()
     except Exception:
         # 備用方案：萬一網路斷線，提供核心科技股
-        return ["NVDA", "AMD", "SMCI", "AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "AVGO"]
+        return ["NVDA", "AMD", "SMCI", "AMZN", "AAPL", "MSFT", "GOOGL", "META", "STX", "AAOI", "WDC", "SNDK", "SPCX", "MU", "NBIS", "MRVL", "TSLA", "AVGO"]
 
 def load_view():
     st.header("🚀 條條大路通多頭 — 全自動強勢股篩選器")
