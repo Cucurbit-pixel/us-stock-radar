@@ -3,98 +3,74 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# 1. 網頁基本設定
-st.set_page_config(page_title="大數據量化掃描器", layout="wide", initial_sidebar_state="expanded")
+# 1. 網頁設定
+st.set_page_config(page_title="臨玖量化雷達", layout="wide")
 
-# 2. 安全調用 Streamlit Secrets 設定檔
+# 2. 安全調用 Secrets
 try:
     ALPACA_API_KEY = st.secrets["ALPACA_API_KEY"]
     ALPACA_SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
 except KeyError:
-    st.error(f"❌ 錯誤：找不到設定中的 Alpaca 金鑰，請前往 Streamlit Settings -> Secrets 設定好金鑰。")
+    st.error("❌ 請在 Streamlit Secrets 設定 Alpaca 金鑰。")
     st.stop()
 
-# 3. 在 側邊欄 (Sidebar) 設定
-st.sidebar.title("🤖 雷達導航中心")
-st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ 量化條件篩選")
+# 3. 行業分類映射表 (GICS 簡化版)
+SECTOR_MAP = {
+    "NVDA": "半導體", "AMD": "半導體", "SMCI": "硬體設備", "AVGO": "半導體",
+    "AMZN": "消費服務", "AAPL": "科技硬體", "MSFT": "軟體服務", "GOOGL": "互動媒體",
+    "META": "互動媒體", "TSLA": "汽車", "COST": "必需消費", "NFLX": "娛樂"
+}
 
-market_stage_filter = st.sidebar.selectbox(
-    "選擇 Stan Weinstein 階段",
-    ["全部", "第一階段 (整理期)", "第二階段 (強勢期)", "第三階段 (派發期)", "第四階段 (弱勢期)", "其他/無明顯狀態"]
-)
+# 輔助函數：火箭等級
+def get_rocket_emoji(rs):
+    if rs >= 85: return "🚀🚀🚀"
+    if rs >= 70: return "🚀🚀"
+    return "🚀"
 
-rs_score = st.sidebar.slider("最低相對強度 (RS) 分數", min_value=10, max_value=99, value=70)
-st.sidebar.caption("數據來源：Alpaca API 大數據全自動對接")
-
-# 4. 全自動數據 (API) 呼叫函數
-@st.cache_data
+# 4. API 呼叫函數
+@st.cache_data(ttl=3600)
 def fetch_market_data(tickers):
     data_url = "https://data.alpaca.markets/v2/stocks/bars"
-    headers = {
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY
-    }
-    
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
-    
+    headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
     params = {
         "symbols": ",".join(tickers),
         "timeframe": "1Day",
-        "start": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end": end_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "adjustment": "all",
-        "feed": "iex" 
+        "start": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "feed": "iex",
+        "adjustment": "all"
     }
-    
     response = requests.get(data_url, headers=headers, params=params)
-    
-    if response.status_code != 200:
-        st.error(f"❌ 數據提取失敗: {response.status_code}")
-        return None
-        
     return response.json().get("bars", {})
 
-# 5. 執行大數據掃描與量化計算
-with st.spinner("🤖 正在處理數據..."):
-    WATCH_LIST = ["NVDA", "AMD", "SMCI", "AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "AVGO", "COST", "NFLX"]
-    all_bars = fetch_market_data(WATCH_LIST)
+# 5. 主程式
+st.title("📈 臨玖 - 全自動量化篩選強勢股")
+
+# 增加股票列表
+WATCH_LIST = ["NVDA", "AMD", "SMCI", "AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "AVGO", "COST", "NFLX", "MSI", "INTU", "V"]
+all_bars = fetch_market_data(WATCH_LIST)
 
 if all_bars:
     processed_results = []
-    
     for ticker, bars in all_bars.items():
-        if len(bars) < 150: # 需要至少 150 日數據
-            continue
-            
+        if len(bars) < 150: continue
         df = pd.DataFrame(bars)
         df['close'] = df['c']
         
-        # 計算 150 日線
-        df['ma150'] = df['close'].rolling(window=150).mean()
-        
-        # 【修正核心】計算半年 (約126個交易日) 漲跌幅
-        if len(df) >= 126:
-            price_now = df['close'].iloc[-1]
-            price_6mo_ago = df['close'].iloc[-126]
-            half_year_perf = ((price_now - price_6mo_ago) / price_6mo_ago) * 100
-        else:
-            half_year_perf = 0
-            
-        # 計算 RS 評分
-        rs_rating = min(int(50 + half_year_perf), 100)
+        # 計算指標
+        current_price = df['close'].iloc[-1]
+        ma150 = df['close'].rolling(window=150).mean().iloc[-1]
+        half_year_perf = ((current_price - df['close'].iloc[-126]) / df['close'].iloc[-126]) * 100
+        rs_rating = min(int(50 + half_year_perf), 99)
         
         processed_results.append({
-            "ticker": ticker,
-            "price": df['close'].iloc[-1],
-            "ma150": df['ma150'].iloc[-1],
-            "rs": rs_rating
+            "股票": ticker,
+            "行業": SECTOR_MAP.get(ticker, "其他"),
+            "現價 ($)": round(current_price, 2),
+            "RS 分數": rs_rating,
+            "動能": get_rocket_emoji(rs_rating)
         })
 
-    report_df = pd.DataFrame(processed_results)
-    if not report_df.empty:
-        st.success("✅ 數據擷取成功！")
-        st.dataframe(report_df)
-    else:
-        st.warning("⚠️ 沒有符合條件數據。")
+    report_df = pd.DataFrame(processed_results).sort_values(by="RS 分數", ascending=False)
+    st.dataframe(report_df, use_container_width=True, hide_index=True)
+else:
+    st.warning("⚠️ 數據獲取中，請稍候...")
