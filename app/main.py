@@ -232,5 +232,5 @@ if not master_df.empty:
         st.info(f"⚠️ 當前選定大盤中，暫時沒有股票達到 {rs_score_min} 分。可嘗試在左側將分數調低。")
 else:
     st.warning("⚠️ 大數據加載失敗，請檢查網絡連線或密鑰。")
-
+ 
 ```
