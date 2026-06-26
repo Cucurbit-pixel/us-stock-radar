@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import time
 
 # 1. 網頁全域設定
-st.set_page_config(page_title="臨玖 - 智能量化搜尋與強勢股雷達", layout="wide")
+st.set_page_config(page_title="臨玖 - 雙大盤智能量化搜尋終端", layout="wide")
 
 # 2. 安全調用 Secrets 密碼箱
 try:
@@ -15,17 +15,35 @@ except KeyError:
     st.error("❌ 密碼箱 (Secrets) 中找不到 Alpaca 憑證！請先前往 Streamlit 設定好金鑰。")
     st.stop()
 
-# 3. 全自動獲取標普 500 成分股清單
-@st.cache_data(ttl=86400)
-def get_sp500_tickers():
+# 🌟 升級核心：全自動即時動態爬取【標普 500】與【納指 100】成分股
+@st.cache_data(ttl=86400) # 一天只爬一次維基百科，極速省流量
+def get_market_tickers():
+    # A. 爬取標普 500
+    sp500 = []
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        tables = pd.read_html(url)
-        df = tables[0]
-        tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
-        return tickers
+        url_sp = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        sp500 = pd.read_html(url_sp)[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
     except Exception as e:
-        return ["NVDA", "AMD", "SMCI", "AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "AVGO", "COST", "NFLX"]
+        st.warning(f"⚠️ 標普 500 爬取微調，啟用備用機制。")
+        sp500 = ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA"]
+
+    # B. 爬取納斯達克 100 (全自動掃描 Ticker 欄位)
+    nasdaq100 = []
+    try:
+        url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
+        tables = pd.read_html(url_ndx)
+        for df in tables:
+            if 'Ticker' in df.columns:
+                nasdaq100 = df['Ticker'].str.replace('.', '-', regex=False).tolist()
+                break
+            elif 'Symbol' in df.columns:
+                nasdaq100 = df['Symbol'].str.replace('.', '-', regex=False).tolist()
+                break
+    except Exception as e:
+        st.warning(f"⚠️ 納指 100 爬取微調，啟用備用機制。")
+        nasdaq100 = ["NVDA", "AMD", "AVGO", "SMCI", "NFLX", "COST", "TSM", "ARM"]
+
+    return sp500, nasdaq100
 
 # 輔助函數：火箭動能等級
 def get_rocket_emoji(rs):
@@ -33,7 +51,7 @@ def get_rocket_emoji(rs):
     if rs >= 70: return "🚀🚀"
     return "🚀"
 
-# 4. 核心量化計算邏輯 (統一處理歷史 K 線與 RS 換算)
+# 核心量化計算邏輯
 def calculate_metrics(ticker, bars):
     if len(bars) < 150:
         return None
@@ -55,7 +73,7 @@ def calculate_metrics(ticker, bars):
         "三級火箭動能": get_rocket_emoji(rs_rating)
     }
 
-# 🌟 大數據分批抓取與計算快取 (標普 500 用)
+# 大數據分批抓取與計算快取 (支援動能大池塘)
 @st.cache_data(ttl=3600)
 def load_and_calculate_master_data(tickers):
     data_url = "https://data.alpaca.markets/v2/stocks/bars"
@@ -78,7 +96,7 @@ def load_and_calculate_master_data(tickers):
                 bars_data = response.json().get("bars", {})
                 if bars_data:
                     all_bars.update(bars_data)
-            time.sleep(0.2)
+            time.sleep(0.2) # 安全間隔，防止免費密鑰過載
         except Exception:
             continue
 
@@ -89,13 +107,13 @@ def load_and_calculate_master_data(tickers):
             results.append(metrics)
     return pd.DataFrame(results)
 
-# 🌟 獨立高速通道：專門處理手動搜尋的單隻股票 (快取時間較短，保持即時性)
+# 獨立高速通道：手動搜尋對比圖專用
 @st.cache_data(ttl=600)
-def fetch_single_ticker_live(ticker):
+def fetch_ticker_and_spy_history(ticker):
     data_url = "https://data.alpaca.markets/v2/stocks/bars"
     headers = {"APCA-API-KEY-ID": ALPACA_API_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY}
     params = {
-        "symbols": ticker,
+        "symbols": f"{ticker},SPY",
         "timeframe": "1Day",
         "start": (datetime.now() - timedelta(days=250)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "feed": "iex",
@@ -104,9 +122,7 @@ def fetch_single_ticker_live(ticker):
     try:
         response = requests.get(data_url, headers=headers, params=params)
         if response.status_code == 200:
-            bars_data = response.json().get("bars", {})
-            if ticker in bars_data:
-                return calculate_metrics(ticker, bars_data[ticker])
+            return response.json().get("bars", {})
     except Exception:
         return None
     return None
@@ -115,70 +131,96 @@ def fetch_single_ticker_live(ticker):
 st.sidebar.title("🤖 雷達導航中心")
 st.sidebar.markdown("---")
 
-# ✨ 新增：手動美股搜尋框 (自動轉換大寫並去除空格)
-st.sidebar.subheader("🔍 個股即時診斷")
-search_input = st.sidebar.text_input("輸入美股代碼 (例如: AVGO, TSM)", "").strip().upper()
+# A. 手動搜尋框
+st.sidebar.subheader("🔍 個股即時診斷 & 大盤對比")
+search_input = st.sidebar.text_input("輸入美股代碼 (例如: TSM, NVDA)", "").strip().upper()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ 大盤大數據濾網")
-rs_score_min = st.sidebar.slider("最低相對強度 (RS) 分數", 10, 99, 80)
+
+# B. 🌟 新增：掃描目標大盤選擇器
+st.sidebar.subheader("⚙️ 掃描大盤配置")
+market_target = st.sidebar.selectbox(
+    "選擇觀測大盤群組",
+    ["Nasdaq 100 (科技龍頭股)", "S&P 500 (標普五百大盤)", "兩大指數合體聯軍 (全明星大池)"]
+)
+
+# C. RS 分數滑桿
+rs_score_min = st.sidebar.slider("最低相對強度 (RS) 分數", 10, 99, 85)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("數據源：Wikipedia + Alpaca IEX Free")
+st.sidebar.caption("數據源：Wikipedia Tickers + Alpaca IEX Free")
 
 
 # 6. 【右側主畫面】分層渲染
 st.title("📈 臨玖量化雷達終端機")
 
-# ==================== 區塊一：個股即時搜尋結果 ====================
+# 同步下載大盤名單數據
+with st.spinner("🔄 正在網絡同步最新美股大盤成分股名單..."):
+    sp500_tickers, nasdaq_tickers = get_market_tickers()
+
+# 根據選單動態決定當前的股票池
+if market_target == "Nasdaq 100 (科技龍頭股)":
+    current_pool = nasdaq_tickers
+    display_title = "Nasdaq 100 強勢股實時掃描器"
+elif market_target == "S&P 500 (標普五百大盤)":
+    current_pool = sp500_tickers
+    display_title = "S&P 500 強勢股實時掃描器"
+else:
+    # 兩大指數聯軍：合體並全自動去重疊 (Set Union)
+    current_pool = list(set(sp500_tickers + nasdaq_tickers))
+    display_title = "S&P 500 + Nasdaq 100 全明星聯軍掃描器"
+
+
+# ==================== 區塊一：個股即時搜尋結果 + TradingView 對比圖 ====================
 if search_input:
     st.markdown(f"### 🔍 手動搜尋個股結果：`{search_input}`")
     
-    # 預先載入大盤數據，看看搜的是不是大盤股
-    sp500_list = get_sp500_tickers()
-    with st.spinner("🤖 正在調度大數據庫..."):
-        master_df = load_and_calculate_master_data(sp500_list)
-    
-    found_in_cache = False
-    # 如果大總表裡面已經有，直接撈，速度快到飛起
-    if not master_df.empty:
-        match_row = master_df[master_df["股票代號"] == search_input]
-        if not match_row.empty:
-            st.success(f"✅ 在標普 500 快取中找到 `{search_input}` 數據：")
-            st.dataframe(match_row, use_container_width=True, hide_index=True)
-            found_in_cache = True
+    with st.spinner(f"🚀 正在穿透交易所，提取 `{search_input}` 與大盤的實時對比數據..."):
+        history_bars = fetch_ticker_and_spy_history(search_input)
+        
+    if history_bars and search_input in history_bars:
+        single_metrics = calculate_metrics(search_input, history_bars[search_input])
+        if single_metrics:
+            st.success(f"🎯 成功獲取 `{search_input}` 量化診斷報告：")
+            st.dataframe(pd.DataFrame([single_metrics]), use_container_width=True, hide_index=True)
             
-    # 如果大總表無（屬於外卡黑馬股），啟動獨立快速通道向交易所要數據
-    if not found_in_cache:
-        with st.spinner(f"🚀 `{search_input}` 不在大盤快取中，正在啟動外卡通道向交易所實時運算..."):
-            single_data = fetch_single_ticker_live(search_input)
-            
-        if single_data:
-            st.success(f"🎯 成功穿透交易所！`{search_input}` 量化診斷報告如下：")
-            single_df = pd.DataFrame([single_data])
-            st.dataframe(single_df, use_container_width=True, hide_index=True)
+            if "SPY" in history_bars:
+                df_stock = pd.DataFrame(history_bars[search_input])
+                df_spy = pd.DataFrame(history_bars["SPY"])
+                
+                df_stock['日期'] = pd.to_datetime(df_stock['t']).dt.date
+                df_spy['日期'] = pd.to_datetime(df_spy['t']).dt.date
+                
+                df_stock = df_stock.set_index('日期')[['c']].rename(columns={'c': f"{search_input} (個股)"})
+                df_spy = df_spy.set_index('日期')[['c']].rename(columns={'c': "S&P 500 (SPY 大盤)"})
+                
+                df_compare = df_stock.join(df_spy, how='inner')
+                if not df_compare.empty:
+                    df_compare_pct = ((df_compare / df_compare.iloc[0]) - 1) * 100
+                    st.markdown(f"#### 📊 TradingView 模式：`{search_input}` vs S&P 500 累計回報對比圖 (歷史 250 天)")
+                    st.line_chart(df_compare_pct, use_container_width=True)
         else:
-            st.error(f"❌ 無法獲取 `{search_input}` 的數據。請檢查代碼是否正確（如 NVDIA 錯字），或該股票歷史 K 線少於 150 天。")
-    st.markdown("---") # 分割線
+            st.error(f"❌ 股票 `{search_input}` 歷史數據不足，無法運算。")
+    else:
+        st.error(f"❌ 無法在交易所中尋獲 `{search_input}`。請檢查代號是否正確。")
+    st.markdown("---")
 
-# ==================== 區塊二：標普 500 大數據強勢股雷達 ====================
-st.markdown("### 📊 標普 500 強勢股實時掃描器")
 
-with st.spinner("🔄 正在同步標普 500 最新成分股名單..."):
-    sp500_list = get_sp500_tickers()
+# ==================== 區塊二：動態大盤強勢股掃描器表格 ====================
+st.markdown(f"### 📊 {display_title}")
 
-with st.spinner(f"🤖 正在實時計算大盤 {len(sp500_list)} 隻股票量化數據..."):
-    master_df = load_and_calculate_master_data(sp500_list)
+with st.spinner(f"🤖 正在實時計算該板塊 {len(current_pool)} 隻股票的量化大數據..."):
+    master_df = load_and_calculate_master_data(current_pool)
 
 if not master_df.empty:
-    # 執行 RS 分數篩選
+    # 執行強度過濾
     filtered_df = master_df[master_df["相對強度 (RS 分數)"] >= rs_score_min]
     
     if not filtered_df.empty:
         filtered_df = filtered_df.sort_values(by="相對強度 (RS 分數)", ascending=False)
-        st.success(f"🎉 瞬間掃描完畢！標普 500 內 RS 分數 ≧ {rs_score_min} 嘅強勢股票共有 {len(filtered_df)} 隻：")
+        st.success(f"🎉 瞬間掃描完畢！當前符合 RS 分數 ≧ {rs_score_min} 嘅強勢股票共有 {len(filtered_df)} 隻：")
         st.dataframe(filtered_df, use_container_width=True, hide_index=True)
     else:
-        st.info("⚠️ 當前 RS 分數篩選太高，大盤暫無標的達標。")
+        st.info(f"⚠️ 當前選定大盤中，暫時沒有股票達到 {rs_score_min} 分。可嘗試在左側將分數調低。")
 else:
-    st.warning("⚠️ 大數據加載失敗，請檢查網絡連線。")
+    st.warning("⚠️ 大數據加載失敗，請檢查網絡連線或密鑰。")
