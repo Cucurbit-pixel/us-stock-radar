@@ -1,4 +1,4 @@
-
+```python
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -88,12 +88,58 @@ def load_all_tickers():
 @st.cache_data(ttl=14400)  # 快取 4 小時
 def fetch_historical_prices(ticker_list):
     """
-    批次下載所有篩選後股票的 1 年歷史收盤價，用於計算 RS 分數
+    極致安全版：批次下載並智能解析收盤價，兼容各種 yfinance 回傳格式
     """
+    if not ticker_list:
+        return pd.DataFrame()
+        
     yf_tickers = [t.replace('/', '-').replace('.', '-') for t in ticker_list]
     try:
-        df_close = yf.download(yf_tickers, period='1y', interval='1d', progress=False)['Adj Close']
+        # 下載數據
+        df = yf.download(yf_tickers, period='1y', interval='1d', progress=False)
+        
+        if df.empty:
+            st.error("⚠️ Yahoo Finance 沒有返回任何歷史股價數據。")
+            return pd.DataFrame()
+            
+        df_close = pd.DataFrame()
+        
+        # 1. 處理標準多重索引 DataFrame (下載多隻股票成功時)
+        if isinstance(df.columns, pd.MultiIndex):
+            if 'Adj Close' in df.columns.levels[0]:
+                df_close = df['Adj Close']
+            elif 'Close' in df.columns.levels[0]:
+                df_close = df['Close']
+                
+        # 2. 處理單一索引 DataFrame (單隻股票或欄位被扁平化)
+        else:
+            if 'Adj Close' in df.columns:
+                df_close = df[['Adj Close']]
+            elif 'Close' in df.columns:
+                df_close = df[['Close']]
+            else:
+                # 處理可能的扁平化欄位 (例如: 'Adj Close_AAPL' 或 'AAPL_Adj Close')
+                adj_cols = [c for c in df.columns if 'Adj Close' in str(c)]
+                if adj_cols:
+                    df_close = df[adj_cols]
+                    # 嘗試簡化欄位名稱為股票代碼
+                    df_close.columns = [str(c).replace('Adj Close_', '').replace('_Adj Close', '') for c in df_close.columns]
+                else:
+                    close_cols = [c for c in df.columns if 'Close' in str(c)]
+                    if close_cols:
+                        df_close = df[close_cols]
+                        df_close.columns = [str(c).replace('Close_', '').replace('_Close', '') for c in df_close.columns]
+                        
+        if df_close.empty:
+            st.error("⚠️ 無法從 Yahoo Finance 返回的資料中定位收盤價欄位。")
+            return pd.DataFrame()
+            
+        # 確保回傳的是 DataFrame 格式
+        if isinstance(df_close, pd.Series):
+            df_close = df_close.to_frame()
+            
         return df_close
+        
     except Exception as e:
         st.error(f"⚠️ 下載股價歷史數據時出錯：{e}")
         return pd.DataFrame()
@@ -104,9 +150,6 @@ def calculate_rs_scores(df_filtered, df_close):
     """
     if df_close.empty:
         return pd.DataFrame()
-    
-    if isinstance(df_close, pd.Series):
-        df_close = df_close.to_frame()
         
     scores = {}
     perf_1y = {}
@@ -130,7 +173,7 @@ def calculate_rs_scores(df_filtered, df_close):
         if p1 == 0 or p2 == 0 or p3 == 0 or p4 == 0:
             continue
             
-        # IBD 加權相對強度公式
+        # IBD 加權相對強度公式 (近 3 個月佔 40%)
         weighted_return = (
             ((p0 - p1) / p1 * 40) +
             ((p0 - p2) / p2 * 20) +
@@ -151,7 +194,13 @@ def calculate_rs_scores(df_filtered, df_close):
     yf_to_orig = {s.replace('/', '-').replace('.', '-'): s for s in original_symbols}
     df_scores['symbol'] = df_scores['yf_symbol'].map(yf_to_orig)
     
-    # 計算 1 到 99 的百分位排名
+    # 過濾掉無法對應原始 symbol 的列
+    df_scores = df_scores.dropna(subset=['symbol'])
+    
+    if df_scores.empty:
+        return pd.DataFrame()
+    
+    # 計算 1 到 99 的百分位排名 (Percentile Rank)
     df_scores['RS_Score'] = df_scores['weighted_score'].rank(pct=True) * 98 + 1
     df_scores['RS_Score'] = df_scores['RS_Score'].round(0).astype(int)
     
@@ -172,7 +221,6 @@ def get_alpaca_client(api_key, secret_key):
     if not ALPACA_AVAILABLE:
         return None
     try:
-        # Alpaca-py 的客戶端初始化
         client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
         return client
     except Exception as e:
@@ -181,15 +229,12 @@ def get_alpaca_client(api_key, secret_key):
 
 def fetch_realtime_price_alpaca(symbol, alpaca_client):
     """
-    使用 Alpaca 獲取最即時的最後一根 K 線收盤價（或即時價格）
+    使用 Alpaca 獲取最即時的最後一根 K 線收盤價
     """
     if not alpaca_client:
         return None
     try:
-        # 將特殊符號轉為 Alpaca 標準格式（如 BRK.B 轉為 BRK/B）
         alpaca_symbol = symbol.replace('-', '/').replace('.', '/')
-        
-        # 請求最新一分鐘 K 線 (Latest Bar)
         request_params = StockLatestBarRequest(symbol_or_symbols=alpaca_symbol)
         latest_bar = alpaca_client.get_stock_latest_bar(request_params)
         
@@ -203,7 +248,6 @@ def fetch_realtime_price_alpaca(symbol, alpaca_client):
                 "volume": bar_data.volume
             }
     except Exception as e:
-        # 靜默失敗或返回 None
         pass
     return None
 
@@ -214,7 +258,7 @@ st.markdown('<div class="main-title">📈 美股 RS 相對強度雷達 & Alpaca 
 # ------------------ Alpaca 金鑰驗證與設定 ------------------
 st.sidebar.header("🔑 Alpaca API 連接設定")
 
-# 優先檢查 Streamlit Secrets 內有無設定，若無則提供側邊欄手動輸入
+# 優先檢查 Streamlit Secrets
 secrets_key = st.secrets.get("ALPACA_API_KEY", "")
 secrets_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
 
@@ -312,7 +356,7 @@ else:
         
         st.info(f"🔄 正在計算 {len(tickers_to_fetch)} 檔大型美股的 1 年加權 RS 強度分數...（此步驟有快取，初次載入約需 5-10 秒）")
         
-        # 抓取歷史價格
+        # 抓取歷史價格 (呼叫升級版函數)
         df_prices = fetch_historical_prices(tickers_to_fetch)
         
         # 計算 RS 分數與排名
@@ -419,30 +463,28 @@ else:
                     )
                     st.plotly_chart(fig_pie, use_container_width=True)
 
-            # ------------------ 個股深度迷你圖 & Alpaca 實時數據整合 ------------------
+            # ------------------ 個股深度歷史趨勢 & Alpaca 實時數據整合 ------------------
             st.markdown("---")
             st.subheader("🔍 個股 1 年趨勢與 Alpaca 實時報價")
             
             selected_ticker = st.selectbox("選擇一檔已篩選個股查看詳情：", options=df_final['symbol'].tolist())
             
             if selected_ticker:
-                # 實時報價區域
                 st.markdown(f"### 🏷️ 股票資訊：{selected_ticker}")
                 
-                # 嘗試調用 Alpaca 實時數據
+                # 實時報價區
                 realtime_data = None
                 if alpaca_client:
                     with st.spinner("⚡ 正在透過 Alpaca 連接實時報價..."):
                         realtime_data = fetch_realtime_price_alpaca(selected_ticker, alpaca_client)
                 
-                # 介面渲染：如果有 Alpaca 的實時數據，就大字高亮顯示最新即時價格！
                 if realtime_data:
                     c1, c2, c3, c4 = st.columns(4)
                     with c1:
                         st.metric(
                             label="⚡ Alpaca 實時價格 (USD)", 
                             value=f"${realtime_data['price']:.2f}",
-                            help="來自 Alpaca 即時數據流（最後一分鐘 Bar）"
+                            help="來自 Alpaca 即時數據流"
                         )
                     with c2:
                         st.metric(label="今日高點 (High)", value=f"${realtime_data['high']:.2f}")
@@ -452,12 +494,11 @@ else:
                         st.metric(label="最新交易量 (Volume)", value=f"{realtime_data['volume']:,}")
                     st.caption(f"🕒 實時報價時間：{realtime_data['time']}")
                 else:
-                    # Fallback 回原本 list 的靜態價格
                     matched_stock = df_final[df_final['symbol'] == selected_ticker].iloc[0]
                     st.metric(
                         label="💵 股價 (USD - 延遲)", 
                         value=f"${matched_stock['price']:.2f}",
-                        help="Alpaca 未連接，此為 Yahoo Finance 日線關盤價或延遲價"
+                        help="Alpaca 未連接，此為 Yahoo Finance 日線關盤價"
                     )
                     if not alpaca_client:
                         st.info("💡 提示：若要啟用零延遲實時報價，請在左側輸入你的 Alpaca API 金鑰！")
@@ -478,11 +519,11 @@ else:
                 else:
                     st.warning("無該股之詳細歷史價格。")
                     
-# 說明欄：公式解釋
+# 說明欄
 st.markdown("""
 <div style="background-color: #EFF6FF; padding: 1.5rem; border-radius: 10px; margin-top: 2rem;">
     <h4>💡 什麼是 RS (Relative Strength) 相對強度分數？</h4>
-    <p>本系統使用之 RS 分數為模擬 <b>William O'Neil (威廉·歐尼爾)</b> 創立之 MarketSmith/IBD 的 RS Rating。它並非單純的技術指標 RSI，而是將個股與<b>全市場所有大於指定市值、有成交量股票</b>的 1 年回報進行加權對比排名。</p>
+    <p>本系統使用之 RS 分數為模擬 <b>William O'Neil (威廉·歐尼爾)</b> 創立之 MarketSmith/IBD 的 RS Rating。它將個股與<b>全市場大於指定市值、有成交量股票</b>的 1 年回報進行加權對比排名。</p>
     <ul>
         <li><b>加權分配</b>：近 3 個月表現佔 <b>40%</b>，其餘三個季度各佔 <b>20%</b>。這能更敏感地捕捉近期爆發的超級強勢領頭羊。</li>
         <li><b>評分區間 (1 - 99)</b>：分數為百分位排名。例如 <b>RS 95</b> 代表該股在過去一年的加權回報率優於市場上 <b>95%</b> 的股票。</li>
@@ -490,3 +531,4 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+```
