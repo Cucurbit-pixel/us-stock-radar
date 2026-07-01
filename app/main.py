@@ -22,13 +22,52 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自定義 CSS 樣式：完全優化為暗黑/黑色主題，解決 Dark Mode 顯示不清晰的問題
+# ==================== 全黑高對比度 CSS 主題 ====================
 st.markdown("""
     <style>
-        /* 強制將頁面底色與卡片底色設為高對比黑色系 */
-        .stApp {
-            background-color: #090A0F;
+        /* 強制將整頁與側邊欄背景設定為純黑，並指定文字顏色 */
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+            background-color: #000000 !important;
+            color: #F3F4F6 !important;
         }
+        
+        [data-testid="stSidebar"] {
+            background-color: #0C0E14 !important;
+            border-right: 1px solid #1F2937;
+        }
+        
+        /* 解決白字白底問題：強制資訊卡為深黑灰底色，邊框亮藍色 */
+        .metric-card {
+            background-color: #111827 !important;
+            padding: 1.2rem;
+            border-radius: 12px;
+            border: 1px solid #374151 !important;
+            border-left: 6px solid #3B82F6 !important;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5) !important;
+            margin-bottom: 1rem;
+        }
+        
+        /* 強制卡片內部字體顏色高對比 */
+        .metric-card h4 {
+            color: #9CA3AF !important;
+            margin-top: 0 !important;
+            margin-bottom: 0.4rem !important;
+            font-size: 0.95rem !important;
+            font-weight: 600 !important;
+        }
+        .metric-card h3 {
+            color: #10B981 !important; /* 螢光綠大字 */
+            margin: 0 !important;
+            font-size: 1.9rem !important;
+            font-weight: 800 !important;
+        }
+        .metric-card p {
+            color: #D1D5DB !important;
+            margin-top: 0.4rem !important;
+            margin-bottom: 0 !important;
+            font-size: 0.85rem !important;
+        }
+
         .main-title {
             font-size: 2.2rem;
             font-weight: 700;
@@ -36,39 +75,9 @@ st.markdown("""
             margin-bottom: 0.3rem;
         }
         .subtitle {
-            font-size: 1.0rem;
+            font-size: 0.95rem;
             color: #9CA3AF;
             margin-bottom: 1.5rem;
-        }
-        
-        /* 徹底解決「白底白字」問題：強制卡片使用暗黑色底，配上亮藍/亮白文字 */
-        .metric-card {
-            background-color: #111827 !important;
-            padding: 1.2rem;
-            border-radius: 10px;
-            border: 1px solid #1F2937;
-            border-left: 5px solid #3B82F6 !important;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            margin-bottom: 1rem;
-        }
-        .metric-card h4 {
-            color: #9CA3AF !important;
-            margin-top: 0 !important;
-            margin-bottom: 0.5rem !important;
-            font-size: 0.9rem !important;
-            font-weight: 500 !important;
-        }
-        .metric-card h3 {
-            color: #3B82F6 !important;
-            margin: 0 !important;
-            font-size: 1.8rem !important;
-            font-weight: 700 !important;
-        }
-        .metric-card p {
-            color: #D1D5DB !important;
-            margin-top: 0.5rem !important;
-            margin-bottom: 0 !important;
-            font-size: 0.8rem !important;
         }
         
         .alpaca-status-on {
@@ -94,12 +103,35 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# ==================== 行業分類中文化對照字典 ====================
+INDUSTRY_MAP = {
+    "Technology": "科技",
+    "Industrials": "工業",
+    "Industrial Services": "工業服務",
+    "Healthcare": "醫療保健",
+    "Health Care": "醫療保健",
+    "Consumer Cyclical": "非必需消費品 (週期)",
+    "Consumer Discretionary": "非必需消費品",
+    "Consumer Defensive": "必需消費品",
+    "Consumer Staples": "必需消費品",
+    "Financial Services": "金融服務",
+    "Financial": "金融",
+    "Finance": "金融",
+    "Energy": "能源",
+    "Basic Materials": "基礎材料",
+    "Real Estate": "房地產",
+    "Utilities": "公共事業",
+    "Communication Services": "通訊服務",
+    "Telecommunications": "通訊服務",
+    "Other": "其他"
+}
+
 # ==================== DATA FETCHING & PROCESSING ====================
 
 @st.cache_data(ttl=43200)  # 快取 12 小時
 def load_all_tickers():
     """
-    從自動更新的 GitHub 倉庫下載全美股名單（含市值、成交量、行業與板塊分類）
+    下載全美股基本數據，並自動將行業分類轉換為中文
     """
     url = "https://raw.githubusercontent.com/Ate329/top-us-stock-tickers/main/tickers/all.csv"
     try:
@@ -107,8 +139,14 @@ def load_all_tickers():
         df['marketCap'] = pd.to_numeric(df['marketCap'], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
         df['price'] = pd.to_numeric(df['price'], errors='coerce')
-        # 排除沒有成交量或市值缺失的股票
+        
+        # 排除無效數據
         df = df.dropna(subset=['marketCap', 'volume', 'symbol'])
+        
+        # 智能轉換行業分類為中文
+        df['industry'] = df['industry'].fillna('Other')
+        df['industry_zh'] = df['industry'].map(lambda x: INDUSTRY_MAP.get(x, x))
+        
         return df
     except Exception as e:
         st.error(f"⚠️ 無法下載美股清單：{e}")
@@ -117,7 +155,7 @@ def load_all_tickers():
 @st.cache_data(ttl=14400)  # 快取 4 小時
 def fetch_historical_prices(ticker_list):
     """
-    安全版：批次下載並智能解析收盤價，兼容各種 yfinance 回傳格式
+    安全版：批次下載並智能解析收盤價，兼容各版本 yfinance 回傳格式
     """
     if not ticker_list:
         return pd.DataFrame()
@@ -132,14 +170,13 @@ def fetch_historical_prices(ticker_list):
             
         df_close = pd.DataFrame()
         
-        # 1. 處理標準多重索引 DataFrame (下載多隻股票成功時)
+        # 處理多重層級 MultiIndex DataFrame
         if isinstance(df.columns, pd.MultiIndex):
             if 'Adj Close' in df.columns.levels[0]:
                 df_close = df['Adj Close']
             elif 'Close' in df.columns.levels[0]:
                 df_close = df['Close']
-                
-        # 2. 處理單一索引 DataFrame (單隻股票或欄位被扁平化)
+        # 處理單一索引 DataFrame
         else:
             if 'Adj Close' in df.columns:
                 df_close = df[['Adj Close']]
@@ -240,7 +277,7 @@ def calculate_rs_scores(df_filtered, df_close):
 
 def get_alpaca_client(api_key, secret_key):
     """
-    初始化 Alpaca 歷史與實時數據客戶端
+    初始化 Alpaca 客戶端
     """
     if not ALPACA_AVAILABLE:
         return None
@@ -253,7 +290,7 @@ def get_alpaca_client(api_key, secret_key):
 
 def fetch_realtime_price_alpaca(symbol, alpaca_client):
     """
-    使用 Alpaca 獲取最即時的最後一根 K 線收盤價
+    使用 Alpaca 獲取最即時的報價
     """
     if not alpaca_client:
         return None
@@ -279,7 +316,7 @@ def fetch_realtime_price_alpaca(symbol, alpaca_client):
 
 st.markdown('<div class="main-title">📈 美股 RS 相對強度雷達 & Alpaca 實時行情</div>', unsafe_allow_html=True)
 
-# ------------------ Alpaca 金鑰驗證與設定 ------------------
+# ------------------ Alpaca 金鑰驗證 ------------------
 st.sidebar.header("🔑 Alpaca API 連接設定")
 
 secrets_key = st.secrets.get("ALPACA_API_KEY", "")
@@ -333,18 +370,18 @@ else:
         step=50000
     )
     
-    # 3. 行業分類篩選
-    all_industries = sorted(df_all['industry'].dropna().unique().tolist())
-    selected_industries = st.sidebar.multiselect(
+    # 3. 中文化行業分類篩選 (已經完美漢化)
+    all_industries_zh = sorted(df_all['industry_zh'].dropna().unique().tolist())
+    selected_industries_zh = st.sidebar.multiselect(
         "選擇行業分類 (可多選，不選代表全選)", 
-        options=all_industries,
+        options=all_industries_zh,
         default=[]
     )
     
     # 4. 個股搜尋
     search_query = st.sidebar.text_input("🔍 搜尋特定股票代號 (例如: NVDA, AAPL)", "").strip().upper()
     
-    # 5. 排序功能 (將 1Y_Return_Pct 拿掉，對應用戶簡化的需求)
+    # 5. 排序功能
     sort_by = st.sidebar.selectbox(
         "排序指標",
         options=["RS_Score", "marketCap", "price"],
@@ -362,8 +399,8 @@ else:
     # ------------------ 數據過濾 ------------------
     df_step1 = df_all[(df_all['marketCap'] >= min_cap_value) & (df_all['volume'] >= min_volume)]
     
-    if selected_industries:
-        df_step1 = df_step1[df_step1['industry'].isin(selected_industries)]
+    if selected_industries_zh:
+        df_step1 = df_step1[df_step1['industry_zh'].isin(selected_industries_zh)]
         
     if search_query:
         df_step1 = df_step1[df_step1['symbol'].str.contains(search_query)]
@@ -390,7 +427,7 @@ else:
             df_display['price'] = df_display['price'].round(2)
             df_display['volume'] = df_display['volume'].apply(lambda x: f"{x:,}")
             
-            # ------------------ 關鍵指標看板 (強制套用高對比暗黑 CSS) ------------------
+            # ------------------ 關鍵指標看板 (強制套用高對比深黑 CSS) ------------------
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.markdown(
@@ -417,7 +454,6 @@ else:
                     unsafe_allow_html=True
                 )
             with col3:
-                # 雖然不顯示 1Y Return，但後台仍可用於分析統計
                 avg_return = df_final['1Y_Return_Pct'].mean()
                 st.markdown(
                     f'''
@@ -432,16 +468,16 @@ else:
 
             st.write("")
             
-            # ------------------ 數據主表展示 (重新排序並簡化欄位) ------------------
+            # ------------------ 數據主表展示 (欄位移位且徹底精簡) ------------------
             st.subheader("📊 篩選結果數據表")
             
             # 1. 移除了 'name' (公司名稱) 和 '1Y_Return_Pct' (1年累積回報)
-            # 2. 將 'industry' (行業分類) 移到 'symbol' (股票代碼) 的正後面
+            # 2. 將中文版 'industry_zh' 移到 'symbol' 的正後面
             df_table = df_display[[
-                'symbol', 'industry', 'RS_Score', 'price', 'marketCap_Billion'
+                'symbol', 'industry_zh', 'RS_Score', 'price', 'marketCap_Billion'
             ]].rename(columns={
                 'symbol': '股票代碼',
-                'industry': '行業分類',
+                'industry_zh': '行業分類',
                 'RS_Score': 'RS 強度得分 (1-99)',
                 'price': '股價 (USD)',
                 'marketCap_Billion': '市值 (億美元)'
@@ -475,7 +511,7 @@ else:
                     title="當前全市場 RS 相對強度分數前 15 名領跑者",
                     labels={"symbol": "股票代碼", "RS_Score": "RS 分數 (越高越強)"},
                     color_continuous_scale=px.colors.sequential.Blues,
-                    hover_data=["price", "industry"]
+                    hover_data=["price", "industry_zh"]
                 )
                 fig_bar.update_layout(
                     xaxis_tickangle=-45,
@@ -490,14 +526,14 @@ else:
                 if high_rs_stocks.empty:
                     st.write("暫無 RS 分數大於等於 80 的強勢股。")
                 else:
-                    industry_counts = high_rs_stocks['industry'].value_counts().reset_index()
+                    industry_counts = high_rs_stocks['industry_zh'].value_counts().reset_index()
                     industry_counts.columns = ['行業分類', '強勢股數量 (RS>=80)']
                     
                     fig_pie = px.pie(
                         industry_counts,
                         values='強勢股數量 (RS>=80)',
                         names='行業分類',
-                        title="高強度股票 (RS Rating 80+) 的行業與版塊分佈",
+                        title="高強度股票 (RS Rating 80+) 的行業與版塊分佈 (中文版)",
                         color_discrete_sequence=px.colors.qualitative.Safe
                     )
                     fig_pie.update_layout(
