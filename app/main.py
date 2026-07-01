@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -957,4 +957,4 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-```
+
