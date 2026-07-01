@@ -1,4 +1,4 @@
-
+```python
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -56,6 +56,15 @@ st.markdown("""
             border-left: 6px solid #F59E0B !important;
             box-shadow: 0 4px 10px rgba(0, 0, 0, 0.6) !important;
             margin-bottom: 1rem;
+        }
+        
+        /* 行業排行榜卡片 */
+        .industry-card {
+            background-color: #0F172A !important;
+            padding: 1rem;
+            border-radius: 10px;
+            border: 1px solid #1E293B;
+            margin-bottom: 0.8rem;
         }
         
         /* 強制卡片內部字體顏色高對比 */
@@ -284,14 +293,83 @@ def calculate_rs_scores(df_filtered, df_close):
     )
     return result_df
 
+# ==================== 機構策略篩選邏輯 ====================
+
+def check_minervini_template(close_series):
+    """
+    Mark Minervini 經典第二階段趨勢模板 (Stage 2 Trend Template) 八大硬性指標判定
+    """
+    if len(close_series) < 250:
+        return False, "歷史數據不足"
+        
+    current_price = close_series.iloc[-1]
+    
+    # 計算移動平均線
+    ma50 = close_series.rolling(50).mean().iloc[-1]
+    ma150 = close_series.rolling(150).mean().iloc[-1]
+    ma200 = close_series.rolling(200).mean().iloc[-1]
+    
+    # 200天均線的趨勢 (需至少上行 1 個月，約 20 個交易日)
+    ma200_prev = close_series.rolling(200).mean().iloc[-22]
+    ma200_trending_up = ma200 > ma200_prev
+    
+    # 52週高位與低位
+    low_52w = close_series.iloc[-252:].min()
+    high_52w = close_series.iloc[-252:].max()
+    
+    # 指標核對
+    cond1 = current_price > ma150 and current_price > ma200  # 股價在150天和200天線上方
+    cond2 = ma150 > ma200                                     # 150天線在200天線上方
+    cond3 = ma200_trending_up                                 # 200天線呈上行趨勢
+    cond4 = ma50 > ma150 and ma50 > ma200                     # 50天線在150天和200天線上方
+    cond5 = current_price > ma50                              # 股價在50天線上方
+    cond6 = current_price >= (low_52w * 1.30)                 # 股價高出52週低點至少 30%
+    cond7 = current_price >= (high_52w * 0.75)                # 股價距離52週高點不低於 25%
+    
+    is_stage2 = cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
+    
+    if is_stage2:
+        return True, "🟢 符合 Stage 2 趨勢"
+    else:
+        return False, "❌ 處於調整/下跌趨勢"
+
+def check_pocket_pivot(close_series, volume_series):
+    """
+    O'Neil Pocket Pivot (口袋突破) 建倉訊號偵測：
+    1. 當天必須是上漲日 (收盤 > 昨日收盤)
+    2. 當天成交量，必須大於過去10天內所有「下跌日」的最高成交量。
+    """
+    if len(close_series) < 11 or len(volume_series) < 11:
+        return False
+        
+    current_close = close_series.iloc[-1]
+    prev_close = close_series.iloc[-2]
+    current_vol = volume_series.iloc[-1]
+    
+    # 必須是上漲日
+    if current_close <= prev_close:
+        return False
+        
+    # 分析過去 10 個交易日的下跌日
+    down_day_volumes = []
+    for i in range(-11, -1):  # 排除今天，往前推 10 天
+        temp_close = close_series.iloc[i]
+        temp_prev_close = close_series.iloc[i-1]
+        temp_vol = volume_series.iloc[i]
+        
+        if temp_close < temp_prev_close:  # 下跌日
+            down_day_volumes.append(temp_vol)
+            
+    # 如果過去 10 天沒有下跌日，或者今日成交量超越了最大的下跌日成交量
+    if not down_day_volumes:
+        return True
+    elif current_vol > max(down_day_volumes):
+        return True
+        
+    return False
+
 # ==================== 臨玖量能與均線突破算法 ====================
 def scan_black_horses(df_final, df_close, df_volume, vol_mult, min_daily_change, max_daily_change, max_ma5_dist):
-    """
-    黑馬突破算法：
-    1. 大資金進場 (當日成交量 >= 20日平均之指定倍數)
-    2. 近 5 個交易日每日平均升幅介於 [min_daily_change, max_daily_change] 之間
-    3. 最新價貼近 5天均線 (偏離度在 [-1.5%, max_ma5_dist] 之間)
-    """
     black_horses = []
     
     for _, row in df_final.iterrows():
@@ -304,26 +382,32 @@ def scan_black_horses(df_final, df_close, df_volume, vol_mult, min_daily_change,
         close_series = df_close[yf_symbol].dropna()
         vol_series = df_volume[yf_symbol].dropna()
         
-        if len(close_series) < 25 or len(vol_series) < 25:
+        if len(close_series) < 252 or len(vol_series) < 252:
             continue
             
-        # 最新價格與成交量
         current_price = close_series.iloc[-1]
         current_vol = vol_series.iloc[-1]
         
-        # 1. 20日均量比（大資金進場指標）
+        # 1. 20日均量比
         ma20_vol = vol_series.rolling(20).mean().iloc[-1]
         vol_ratio = current_vol / ma20_vol if ma20_vol > 0 else 0
         
-        # 2. 近 5 日表現 (計算每日收益率並取平均值)
-        last_5_closes = close_series.iloc[-6:] # 獲取 6 天以計算 5 個每日收益
+        # 2. 近 5 日表現
+        last_5_closes = close_series.iloc[-6:]
         daily_returns_5d = last_5_closes.pct_change().dropna() * 100
         avg_daily_change = daily_returns_5d.mean()
         cumulative_5d = ((last_5_closes.iloc[-1] - last_5_closes.iloc[0]) / last_5_closes.iloc[0]) * 100
         
-        # 3. 偏離 5 天線 % (MA5)
+        # 3. 偏離 5 天線 %
         ma5_price = close_series.rolling(5).mean().iloc[-1]
         ma5_dist = ((current_price - ma5_price) / ma5_price) * 100
+        
+        # 4. 偵測 Minervini Stage 2
+        is_stage2, _ = check_minervini_template(close_series)
+        
+        # 5. 偵測 Pocket Pivot
+        has_pocket = check_pocket_pivot(close_series, vol_series)
+        pocket_signal = "🔵 口袋突破" if has_pocket else "無"
         
         # 篩選條件
         if (vol_ratio >= vol_mult) and (min_daily_change <= avg_daily_change <= max_daily_change) and (-1.5 <= ma5_dist <= max_ma5_dist):
@@ -336,7 +420,9 @@ def scan_black_horses(df_final, df_close, df_volume, vol_mult, min_daily_change,
                 "avg_daily_change": round(avg_daily_change, 2),
                 "cumulative_5d": round(cumulative_5d, 2),
                 "ma5_dist": round(ma5_dist, 2),
-                "vol_ratio": round(vol_ratio, 2)
+                "vol_ratio": round(vol_ratio, 2),
+                "trend_status": "Stage 2 🟢" if is_stage2 else "調整 🟡",
+                "pocket_pivot": pocket_signal
             })
             
     return pd.DataFrame(black_horses)
@@ -429,7 +515,16 @@ else:
         step=50000
     )
     
-    # 3. 中文化行業分類篩選
+    # 3. RS 得分篩選門檻 (新加入實戰控制)
+    min_rs_filter = st.sidebar.slider(
+        "最低 RS 強度得分 (只顯示強勢股)",
+        min_value=1,
+        max_value=99,
+        value=80,  # 預設過濾 80 分以上的高動能股
+        step=1
+    )
+    
+    # 4. 中文化行業分類篩選
     all_industries_zh = sorted(df_all['industry_zh'].dropna().unique().tolist())
     selected_industries_zh = st.sidebar.multiselect(
         "選擇行業分類 (可多選，不選代表全選)", 
@@ -437,7 +532,7 @@ else:
         default=[]
     )
     
-    # 4. 個股搜尋
+    # 5. 個股搜尋
     search_query = st.sidebar.text_input("🔍 搜尋特定股票代號 (例如: NVDA, AAPL)", "").strip().upper()
     
     # ------------------ 臨玖選股參數自定義區 ------------------
@@ -455,9 +550,9 @@ else:
     
     min_daily_change = st.sidebar.slider(
         "近5日平均每日最小升幅 (%)", 
-        min_value=1.0, 
+        min_value=0.5, 
         max_value=5.0, 
-        value=3.0, 
+        value=1.5, 
         step=0.5,
         help="過去5個交易日之每日平均回報的底線值"
     )
@@ -465,8 +560,8 @@ else:
     max_daily_change = st.sidebar.slider(
         "近5日平均每日最大升幅 (%)", 
         min_value=3.0, 
-        max_value=10.0, 
-        value=5.0, 
+        max_value=15.0, 
+        value=8.0, 
         step=0.5,
         help="限制其上漲熱度，防止選中已過度透支動能的股票"
     )
@@ -474,7 +569,7 @@ else:
     max_ma5_dist = st.sidebar.slider(
         "最新股價最大偏離5天線 (%)", 
         min_value=2.0, 
-        max_value=8.0, 
+        max_value=10.0, 
         value=5.0, 
         step=0.5,
         help="限制最新價格拋離MA5的幅度，防止高位接盤（建議<=5%）"
@@ -517,11 +612,14 @@ else:
         df_prices, df_volume = fetch_historical_prices_and_volume(tickers_to_fetch)
         
         # 計算 RS 分數
-        df_final = calculate_rs_scores(df_step1, df_prices)
+        df_final_all = calculate_rs_scores(df_step1, df_prices)
         
-        if df_final.empty:
+        if df_final_all.empty:
             st.error("❌ 計算 RS 分數時出錯，無法獲取足夠的歷史股價數據。")
         else:
+            # 依用戶指定的最低 RS 門檻過濾
+            df_final = df_final_all[df_final_all['RS_Score'] >= min_rs_filter]
+            
             # 計算臨玖黑馬篩選
             df_black_horses = scan_black_horses(
                 df_final, df_prices, df_volume, 
@@ -535,38 +633,43 @@ else:
             df_display['price'] = df_display['price'].round(2)
             df_display['volume'] = df_display['volume'].apply(lambda x: f"{x:,}")
             
-            # ------------------ 頂部看板 (高對比黑底主題) ------------------
-            col1, col2, col3 = st.columns(3)
-            with col1:
+            # ------------------ 新增：強勢行業熱力排行計算 ------------------
+            # 只計算高 RS 得分股票所屬的行業平均實力
+            industry_ranking = df_final_all.groupby('industry_zh')['RS_Score'].mean().reset_index()
+            industry_ranking = industry_ranking.sort_values(by='RS_Score', ascending=False)
+            
+            # ------------------ 頂部看板 ------------------
+            col_metric1, col_metric2, col_metric3 = st.columns(3)
+            with col_metric1:
                 st.markdown(
                     f'''
                     <div class="metric-card">
-                        <h4>📋 符合篩選總數</h4>
+                        <h4>📋 符合 RS {min_rs_filter}+ 總數</h4>
                         <h3>{len(df_final)} 檔</h3>
                         <p>市值 ＞ {min_cap_billion} 億美元</p>
                     </div>
                     ''', 
                     unsafe_allow_html=True
                 )
-            with col2:
+            with col_metric2:
                 black_horse_count = len(df_black_horses)
                 st.markdown(
                     f'''
                     <div class="alert-card">
                         <h4>🚨 資金突襲黑馬 (MA5貼線)</h4>
                         <h3>{black_horse_count} 檔</h3>
-                        <p>爆量 + 近5日大升 + 未脫離5天線</p>
+                        <p>爆量 + 近5日拉升 + 未脫離5天線</p>
                     </div>
                     ''', 
                     unsafe_allow_html=True
                 )
-            with col3:
-                top_stock = df_final.sort_values(by="RS_Score", ascending=False).iloc[0] if not df_final.empty else None
+            with col_metric3:
+                top_stock = df_final_all.sort_values(by="RS_Score", ascending=False).iloc[0] if not df_final_all.empty else None
                 top_name = f"{top_stock['symbol']} ({top_stock['RS_Score']}分)" if top_stock is not None else "N/A"
                 st.markdown(
                     f'''
                     <div class="metric-card">
-                        <h4>👑 市場領頭強勢股 (RS 榜首)</h4>
+                        <h4>👑 全市場最強 (RS 榜首)</h4>
                         <h3>{top_name}</h3>
                         <p>大市強勢先鋒指標</p>
                     </div>
@@ -577,23 +680,42 @@ else:
             st.write("")
             
             # ------------------ 主頁頁籤系統 ------------------
-            tab_main, tab_black_horse, tab_chart = st.tabs([
+            tab_main, tab_black_horse, tab_industry, tab_chart = st.tabs([
                 "📊 全市場 RS 篩選雷達", 
-                "🚨 臨玖資金突襲黑馬選股器", 
-                "🎨 板塊與行業分析"
+                "🚨 臨玖資金突襲黑馬選股器",
+                "🏆 強勢行業熱力排行",
+                "🎨 視覺圖表分析"
             ])
             
             # --- Tab 1: 全市場 RS 篩選主表 ---
             with tab_main:
                 st.subheader("美股大型板塊 RS 成交清單")
                 
-                # 重新調整過的格式與前移中文行業分類
+                # 計算每檔股票的 Stage 2 趨勢狀態和口袋突破標籤，並加入主表
+                trend_list = []
+                pocket_list = []
+                for _, row in df_display.iterrows():
+                    sym = row['symbol']
+                    yf_sym = sym.replace('/', '-').replace('.', '-')
+                    if yf_sym in df_prices.columns and yf_sym in df_volume.columns:
+                        close_s = df_prices[yf_sym].dropna()
+                        vol_s = df_volume[yf_sym].dropna()
+                        is_s2, _ = check_minervini_template(close_s)
+                        trend_list.append("🟢 Stage 2" if is_s2 else "🟡 整理中")
+                        pocket_list.append("🔵 口袋突破" if check_pocket_pivot(close_s, vol_s) else "無")
+                    else:
+                        trend_list.append("未知")
+                        pocket_list.append("無")
+                
+                df_display['趨勢模板'] = trend_list
+                df_display['主力建倉'] = pocket_list
+                
                 df_table = df_display[[
-                    'symbol', 'industry_zh', 'RS_Score', 'price', 'marketCap_Billion'
+                    'symbol', 'industry_zh', 'RS_Score', 'price', 'marketCap_Billion', '趨勢模板', '主力建倉'
                 ]].rename(columns={
                     'symbol': '股票代碼',
                     'industry_zh': '行業分類',
-                    'RS_Score': 'RS 強度得分 (1-99)',
+                    'RS_Score': 'RS 得分 (1-99)',
                     'price': '股價 (USD)',
                     'marketCap_Billion': '市值 (億美元)'
                 })
@@ -619,7 +741,7 @@ else:
                     st.warning("⚠️ 暫時沒有符合此高標準爆量貼線條件的股票。你可以調整左側的篩選參數試試看！")
                 else:
                     df_bh_table = df_black_horses[[
-                        'symbol', 'industry_zh', 'RS_Score', 'avg_daily_change', 'cumulative_5d', 'ma5_dist', 'vol_ratio', 'price', 'marketCap_Billion'
+                        'symbol', 'industry_zh', 'RS_Score', 'avg_daily_change', 'cumulative_5d', 'ma5_dist', 'vol_ratio', 'trend_status', 'pocket_pivot', 'price', 'marketCap_Billion'
                     ]].rename(columns={
                         'symbol': '股票代碼',
                         'industry_zh': '行業分類',
@@ -628,13 +750,13 @@ else:
                         'cumulative_5d': '5日累計 (%)',
                         'ma5_dist': '偏離5天線 (%)',
                         'vol_ratio': '量比 (20均量)',
+                        'trend_status': '趨勢狀態',
+                        'pocket_pivot': '主力建倉',
                         'price': '股價 (USD)',
                         'marketCap_Billion': '市值 (億美元)'
                     })
                     
-                    # 按照量比排序，將資金流入最大的排在最前
                     df_bh_table = df_bh_table.sort_values(by="量比 (20均量)", ascending=False)
-                    
                     st.dataframe(df_bh_table, use_container_width=True, hide_index=True)
                     
                     # 導出黑馬名單
@@ -647,7 +769,45 @@ else:
                         key="dl_bh"
                     )
             
-            # --- Tab 3: 板塊與行業分析 ---
+            # --- Tab 3: 強勢行業熱力排行 ---
+            with tab_industry:
+                st.subheader("🏆 全美股大板塊行業強勢排行榜")
+                st.write("這是根據全市場大市值標的的 RS 相對強度所計算出來的**行業平均分**。尋找熱點行業，能幫你事半功倍！")
+                
+                col_ind1, col_ind2 = st.columns(2)
+                with col_ind1:
+                    st.markdown("### 🔥 熱門資金抱團行業 (Top 5)")
+                    for idx, row in industry_ranking.head(5).iterrows():
+                        st.markdown(
+                            f'''
+                            <div class="industry-card">
+                                <span style="font-size:1.1rem; font-weight:700; color:#F59E0B;">NO.{idx+1} {row['industry_zh']}</span>
+                                <br><span style="color:#9CA3AF;">行業平均 RS 強度：</span><b style="color:#10B981; font-size:1.1rem;">{row['RS_Score']:.1f} 分</b>
+                            </div>
+                            ''',
+                            unsafe_allow_html=True
+                        )
+                with col_ind2:
+                    # 使用 plotly 呈現行業平均得分橫向柱狀圖
+                    fig_ind = px.bar(
+                        industry_ranking,
+                        x="RS_Score",
+                        y="industry_zh",
+                        orientation="h",
+                        title="各中文行業平均相對強度分數比較",
+                        labels={"RS_Score": "行業平均 RS 得分", "industry_zh": "行業名稱"},
+                        color="RS_Score",
+                        color_continuous_scale=px.colors.sequential.YlGnBu
+                    )
+                    fig_ind.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font_color='#F3F4F6',
+                        yaxis={'categoryorder':'total ascending'}
+                    )
+                    st.plotly_chart(fig_ind, use_container_width=True)
+
+            # --- Tab 4: 視覺圖表分析 ---
             with tab_chart:
                 st.subheader("🎨 行業與強勢股分佈圖表")
                 col_bar, col_pie = st.columns(2)
@@ -673,7 +833,7 @@ else:
                     st.plotly_chart(fig_bar, use_container_width=True)
                     
                 with col_pie:
-                    high_rs_stocks = df_final[df_final['RS_Score'] >= 80]
+                    high_rs_stocks = df_final_all[df_final_all['RS_Score'] >= 80]
                     if high_rs_stocks.empty:
                         st.write("暫無 RS 分數大於等於 80 的強勢股。")
                     else:
@@ -697,7 +857,6 @@ else:
             st.markdown("---")
             st.subheader("🔍 個股 1 年趨勢與 Alpaca 盤前/實時行情")
             
-            # 優先加載黑馬清單供快速點擊
             default_options = df_final['symbol'].tolist()
             if not df_black_horses.empty:
                 st.info(f"💡 發現 {len(df_black_horses)} 隻爆升黑馬！已在下方名單中置頂優先顯示。")
@@ -713,7 +872,6 @@ else:
                     with st.spinner("⚡ 正在透過 Alpaca 連接實時報價..."):
                         realtime_data = fetch_realtime_price_alpaca(selected_ticker, alpaca_client)
                 
-                # Alpaca 實時數據顯示區
                 if realtime_data:
                     c1, c2, c3, c4 = st.columns(4)
                     with c1:
@@ -730,7 +888,7 @@ else:
                         st.metric(label="最新交易量 (Volume)", value=f"{realtime_data['volume']:,}")
                     st.caption(f"🕒 實時報價時間：{realtime_data['time']}")
                 else:
-                    matched_stock = df_final[df_final['symbol'] == selected_ticker].iloc[0]
+                    matched_stock = df_final_all[df_final_all['symbol'] == selected_ticker].iloc[0]
                     st.metric(
                         label="💵 股價 (USD - 延遲)", 
                         value=f"${matched_stock['price']:.2f}",
@@ -739,13 +897,14 @@ else:
                     if not alpaca_client:
                         st.info("💡 提示：若要啟用盤前零延遲實時報價，請在左側輸入你的 Alpaca API 金鑰！")
                 
-                # 歷史趨勢圖 (加上 5天線 MA5，以便直觀觀察是否偏離)
+                # 歷史趨勢圖 (加上 MA5、MA50、MA200，提供最精確的圖表對照)
                 yf_formatted = selected_ticker.replace('/', '-').replace('.', '-')
                 if yf_formatted in df_prices.columns:
                     stock_series = df_prices[yf_formatted].dropna()
                     
-                    # 計算 MA5
                     ma5_series = stock_series.rolling(5).mean()
+                    ma50_series = stock_series.rolling(50).mean()
+                    ma200_series = stock_series.rolling(200).mean()
                     
                     fig_line = go.Figure()
                     # 1. 股價日線
@@ -754,15 +913,27 @@ else:
                         mode='lines', name='收盤價 (Close)',
                         line=dict(color='#2563EB', width=2)
                     ))
-                    # 2. 5天移動平均線 (MA5)
+                    # 2. 5天線 (MA5)
                     fig_line.add_trace(go.Scatter(
                         x=ma5_series.index, y=ma5_series.values,
                         mode='lines', name='5天線 (MA5)',
                         line=dict(color='#F59E0B', width=1.5, dash='dash')
                     ))
+                    # 3. 50天均線 (MA50 - 中期生命線)
+                    fig_line.add_trace(go.Scatter(
+                        x=ma50_series.index, y=ma50_series.values,
+                        mode='lines', name='50天線 (MA50)',
+                        line=dict(color='#10B981', width=1.5)
+                    ))
+                    # 4. 200天均線 (MA200 - 長期牛熊線)
+                    fig_line.add_trace(go.Scatter(
+                        x=ma200_series.index, y=ma200_series.values,
+                        mode='lines', name='200天線 (MA200)',
+                        line=dict(color='#EF4444', width=2)
+                    ))
                     
                     fig_line.update_layout(
-                        title=f"{selected_ticker} - 近 1 年日 K 線與 5 天均線走勢對照",
+                        title=f"{selected_ticker} - 近 1 年日 K 線與關鍵均線走勢對照",
                         xaxis_title="日期",
                         yaxis_title="股價 (USD)",
                         paper_bgcolor='rgba(0,0,0,0)',
@@ -777,13 +948,13 @@ else:
 # 說明欄
 st.markdown("""
 <div style="background-color: #111827; padding: 1.5rem; border-radius: 10px; margin-top: 2rem; border: 1px solid #1F2937;">
-    <h4 style="color: #3B82F6;">💡 什麼是 臨玖·資金暴風黑馬策略？</h4>
-    <p style="color: #D1D5DB;">本策略致力於尋找美股大市值標的中，有機構「大資金流入」、近5日展現「強勢拉升慣性」，同時「價格尚未過度拋離」短期支撐線（5天均線）的黑馬爆發點：</p>
+    <h4 style="color: #3B82F6;">💡 什麼是 馬克·米奈爾維尼 Stage 2 (第二階段) 與 歐尼爾口袋突破？</h4>
+    <p style="color: #D1D5DB;">本系統整合了動能大師們最核心的交易訊號：</p>
     <ul style="color: #D1D5DB;">
-        <li><b>量比 (20均量)</b>：篩選今日成交量放大至 20天平均成交量 1.5 倍以上之個股。量先價行，量比放大通常代表大資金主動進場吸籌。</li>
-        <li><b>5日均幅 (3% - 5%)</b>：確保股票具有強大上升慣性與動力，但不過度透支，防止買到橫盤不漲的弱勢股。</li>
-        <li><b>偏離5天線 (<= 5%)</b>：嚴控風險！只在回調至貼近 5天均線附近（偏離度在 5% 以內）或踩線突破時買入，防止高位接盤。</li>
+        <li><b>馬克·米奈爾維尼 Stage 2 趨勢模板</b>：這是一套完美的長期多頭均線過濾系統。它要求股價在 150 和 200MA 之上、200MA 持續上行至少 1 個月、且 50MA 大於 150MA 及 200MA。能被篩選出的股票，都是最健康的牛市主升浪股票！</li>
+        <li><b>歐尼爾 口袋突破 (Pocket Pivot)</b>：這代表有機構在整理區間中「暗中逢低吸籌」。當一隻股票在整理底部的上升日，其成交量比過去 10 個交易日中任何一隻下跌日的最高成交量還要大，系統就會標記「🔵 口袋突破」，通常這意味著新一輪主升浪的突破前兆。</li>
     </ul>
 </div>
 """, unsafe_allow_html=True)
 
+```
