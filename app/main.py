@@ -4,7 +4,7 @@ import pandas as pd
 import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # 匯入 Alpaca SDK 相關模組
 try:
@@ -22,44 +22,74 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自定義 CSS 樣式提升 UI 美感
+# 自定義 CSS 樣式：完全優化為暗黑/黑色主題，解決 Dark Mode 顯示不清晰的問題
 st.markdown("""
     <style>
+        /* 強制將頁面底色與卡片底色設為高對比黑色系 */
+        .stApp {
+            background-color: #090A0F;
+        }
         .main-title {
-            font-size: 2.5rem;
+            font-size: 2.2rem;
             font-weight: 700;
-            color: #1E3A8A;
-            margin-bottom: 0.5rem;
+            color: #3B82F6;
+            margin-bottom: 0.3rem;
         }
         .subtitle {
-            font-size: 1.1rem;
-            color: #4B5563;
-            margin-bottom: 2rem;
+            font-size: 1.0rem;
+            color: #9CA3AF;
+            margin-bottom: 1.5rem;
         }
+        
+        /* 徹底解決「白底白字」問題：強制卡片使用暗黑色底，配上亮藍/亮白文字 */
         .metric-card {
-            background-color: #F3F4F6;
+            background-color: #111827 !important;
             padding: 1.2rem;
             border-radius: 10px;
-            border-left: 5px solid #2563EB;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            border: 1px solid #1F2937;
+            border-left: 5px solid #3B82F6 !important;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            margin-bottom: 1rem;
         }
+        .metric-card h4 {
+            color: #9CA3AF !important;
+            margin-top: 0 !important;
+            margin-bottom: 0.5rem !important;
+            font-size: 0.9rem !important;
+            font-weight: 500 !important;
+        }
+        .metric-card h3 {
+            color: #3B82F6 !important;
+            margin: 0 !important;
+            font-size: 1.8rem !important;
+            font-weight: 700 !important;
+        }
+        .metric-card p {
+            color: #D1D5DB !important;
+            margin-top: 0.5rem !important;
+            margin-bottom: 0 !important;
+            font-size: 0.8rem !important;
+        }
+        
         .alpaca-status-on {
-            background-color: #DCFCE7;
-            color: #15803D;
-            padding: 0.3rem 0.8rem;
+            background-color: #064E3B;
+            color: #34D399;
+            padding: 0.4rem 0.8rem;
             border-radius: 20px;
             font-size: 0.85rem;
             font-weight: bold;
             display: inline-block;
+            border: 1px solid #059669;
         }
         .alpaca-status-off {
-            background-color: #FEF3C7;
-            color: #92400E;
-            padding: 0.3rem 0.8rem;
+            background-color: #78350F;
+            color: #FBBF24;
+            padding: 0.4rem 0.8rem;
             border-radius: 20px;
             font-size: 0.85rem;
             font-weight: bold;
             display: inline-block;
+            border: 1px solid #D97706;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -74,7 +104,6 @@ def load_all_tickers():
     url = "https://raw.githubusercontent.com/Ate329/top-us-stock-tickers/main/tickers/all.csv"
     try:
         df = pd.read_csv(url)
-        # 確保重要數值欄位為數值格式
         df['marketCap'] = pd.to_numeric(df['marketCap'], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
         df['price'] = pd.to_numeric(df['price'], errors='coerce')
@@ -88,14 +117,13 @@ def load_all_tickers():
 @st.cache_data(ttl=14400)  # 快取 4 小時
 def fetch_historical_prices(ticker_list):
     """
-    極致安全版：批次下載並智能解析收盤價，兼容各種 yfinance 回傳格式
+    安全版：批次下載並智能解析收盤價，兼容各種 yfinance 回傳格式
     """
     if not ticker_list:
         return pd.DataFrame()
         
     yf_tickers = [t.replace('/', '-').replace('.', '-') for t in ticker_list]
     try:
-        # 下載數據
         df = yf.download(yf_tickers, period='1y', interval='1d', progress=False)
         
         if df.empty:
@@ -118,11 +146,9 @@ def fetch_historical_prices(ticker_list):
             elif 'Close' in df.columns:
                 df_close = df[['Close']]
             else:
-                # 處理可能的扁平化欄位 (例如: 'Adj Close_AAPL' 或 'AAPL_Adj Close')
                 adj_cols = [c for c in df.columns if 'Adj Close' in str(c)]
                 if adj_cols:
                     df_close = df[adj_cols]
-                    # 嘗試簡化欄位名稱為股票代碼
                     df_close.columns = [str(c).replace('Adj Close_', '').replace('_Adj Close', '') for c in df_close.columns]
                 else:
                     close_cols = [c for c in df.columns if 'Close' in str(c)]
@@ -134,7 +160,6 @@ def fetch_historical_prices(ticker_list):
             st.error("⚠️ 無法從 Yahoo Finance 返回的資料中定位收盤價欄位。")
             return pd.DataFrame()
             
-        # 確保回傳的是 DataFrame 格式
         if isinstance(df_close, pd.Series):
             df_close = df_close.to_frame()
             
@@ -194,13 +219,12 @@ def calculate_rs_scores(df_filtered, df_close):
     yf_to_orig = {s.replace('/', '-').replace('.', '-'): s for s in original_symbols}
     df_scores['symbol'] = df_scores['yf_symbol'].map(yf_to_orig)
     
-    # 過濾掉無法對應原始 symbol 的列
     df_scores = df_scores.dropna(subset=['symbol'])
     
     if df_scores.empty:
         return pd.DataFrame()
     
-    # 計算 1 到 99 的百分位排名 (Percentile Rank)
+    # 計算 1 到 99 的百分位排名
     df_scores['RS_Score'] = df_scores['weighted_score'].rank(pct=True) * 98 + 1
     df_scores['RS_Score'] = df_scores['RS_Score'].round(0).astype(int)
     
@@ -258,7 +282,6 @@ st.markdown('<div class="main-title">📈 美股 RS 相對強度雷達 & Alpaca 
 # ------------------ Alpaca 金鑰驗證與設定 ------------------
 st.sidebar.header("🔑 Alpaca API 連接設定")
 
-# 優先檢查 Streamlit Secrets
 secrets_key = st.secrets.get("ALPACA_API_KEY", "")
 secrets_secret = st.secrets.get("ALPACA_SECRET_KEY", "")
 
@@ -270,12 +293,10 @@ else:
     alpaca_api_key = st.sidebar.text_input("Alpaca API Key", value="", type="password")
     alpaca_secret_key = st.sidebar.text_input("Alpaca Secret Key", value="", type="password")
 
-# 初始化 Alpaca 客戶端
 alpaca_client = None
 if alpaca_api_key and alpaca_secret_key:
     alpaca_client = get_alpaca_client(alpaca_api_key, alpaca_secret_key)
 
-# 顯示 Alpaca 即時狀態
 if alpaca_client:
     st.markdown('<div class="alpaca-status-on">● Alpaca 實時報價引擎：已連線</div>', unsafe_allow_html=True)
 else:
@@ -323,16 +344,15 @@ else:
     # 4. 個股搜尋
     search_query = st.sidebar.text_input("🔍 搜尋特定股票代號 (例如: NVDA, AAPL)", "").strip().upper()
     
-    # 5. 排序功能
+    # 5. 排序功能 (將 1Y_Return_Pct 拿掉，對應用戶簡化的需求)
     sort_by = st.sidebar.selectbox(
         "排序指標",
-        options=["RS_Score", "marketCap", "price", "1Y_Return_Pct"],
+        options=["RS_Score", "marketCap", "price"],
         index=0,
         format_func=lambda x: {
             "RS_Score": "RS 相對強度分數 (1-99)",
             "marketCap": "市值 (Market Cap)",
-            "price": "最新股價 (Price)",
-            "1Y_Return_Pct": "1年累積漲幅 (%)"
+            "price": "最新股價 (Price)"
         }[x]
     )
     
@@ -356,66 +376,80 @@ else:
         
         st.info(f"🔄 正在計算 {len(tickers_to_fetch)} 檔大型美股的 1 年加權 RS 強度分數...（此步驟有快取，初次載入約需 5-10 秒）")
         
-        # 抓取歷史價格 (呼叫升級版函數)
         df_prices = fetch_historical_prices(tickers_to_fetch)
-        
-        # 計算 RS 分數與排名
         df_final = calculate_rs_scores(df_step1, df_prices)
         
         if df_final.empty:
             st.error("❌ 計算 RS 分數時出錯，無法獲取足夠的歷史股價數據。")
         else:
-            # 套用用戶選定的排序方式
             df_final = df_final.sort_values(by=sort_by, ascending=ascending_order)
             
             # 格式化欄位以便精美展示
             df_display = df_final.copy()
             df_display['marketCap_Billion'] = (df_display['marketCap'] / 1_000_000_000).round(2)
-            df_display['1Y_Return_Pct'] = df_display['1Y_Return_Pct'].round(2)
             df_display['price'] = df_display['price'].round(2)
             df_display['volume'] = df_display['volume'].apply(lambda x: f"{x:,}")
             
-            # ------------------ 關鍵指標看板 ------------------
+            # ------------------ 關鍵指標看板 (強制套用高對比暗黑 CSS) ------------------
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.markdown(
-                    f'<div class="metric-card"><h4>📋 符合篩選總數</h4><h3>{len(df_final)} 檔</h3><p>市值 ＞ {min_cap_billion} 億美元</p></div>', 
+                    f'''
+                    <div class="metric-card">
+                        <h4>📋 符合篩選總數</h4>
+                        <h3>{len(df_final)} 檔</h3>
+                        <p>市值 ＞ {min_cap_billion} 億美元</p>
+                    </div>
+                    ''', 
                     unsafe_allow_html=True
                 )
             with col2:
                 top_stock = df_final.sort_values(by="RS_Score", ascending=False).iloc[0] if not df_final.empty else None
                 top_name = f"{top_stock['symbol']} ({top_stock['RS_Score']}分)" if top_stock is not None else "N/A"
                 st.markdown(
-                    f'<div class="metric-card"><h4>👑 當前市場最強 (RS 榜首)</h4><h3>{top_name}</h3><p>{top_stock["name"] if top_stock is not None else ""}</p></div>', 
+                    f'''
+                    <div class="metric-card">
+                        <h4>👑 市場領頭強勢股 (RS 榜首)</h4>
+                        <h3>{top_name}</h3>
+                        <p>大市強勢先鋒指標</p>
+                    </div>
+                    ''', 
                     unsafe_allow_html=True
                 )
             with col3:
+                # 雖然不顯示 1Y Return，但後台仍可用於分析統計
                 avg_return = df_final['1Y_Return_Pct'].mean()
                 st.markdown(
-                    f'<div class="metric-card"><h4>📈 篩選名單平均年回報</h4><h3>{avg_return:.2f}%</h3><p>對比 S&P 500 平均表現</p></div>', 
+                    f'''
+                    <div class="metric-card">
+                        <h4>📈 篩選名單平均年回報</h4>
+                        <h3>{avg_return:.2f}%</h3>
+                        <p>對比 S&P 500 平均表現</p>
+                    </div>
+                    ''', 
                     unsafe_allow_html=True
                 )
 
             st.write("")
             
-            # ------------------ 數據主表展示 ------------------
+            # ------------------ 數據主表展示 (重新排序並簡化欄位) ------------------
             st.subheader("📊 篩選結果數據表")
             
+            # 1. 移除了 'name' (公司名稱) 和 '1Y_Return_Pct' (1年累積回報)
+            # 2. 將 'industry' (行業分類) 移到 'symbol' (股票代碼) 的正後面
             df_table = df_display[[
-                'symbol', 'name', 'RS_Score', '1Y_Return_Pct', 'price', 'marketCap_Billion', 'industry'
+                'symbol', 'industry', 'RS_Score', 'price', 'marketCap_Billion'
             ]].rename(columns={
                 'symbol': '股票代碼',
-                'name': '公司名稱',
+                'industry': '行業分類',
                 'RS_Score': 'RS 強度得分 (1-99)',
-                '1Y_Return_Pct': '1年累積回報 (%)',
                 'price': '股價 (USD)',
-                'marketCap_Billion': '市值 (億美元)',
-                'industry': '行業分類'
+                'marketCap_Billion': '市值 (億美元)'
             })
             
             st.dataframe(df_table, use_container_width=True, hide_index=True)
             
-            # 提供 CSV 下載按鈕
+            # 下載按鈕
             csv_data = df_table.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 下載篩選數據 (CSV)",
@@ -437,13 +471,18 @@ else:
                     top_15,
                     x="symbol",
                     y="RS_Score",
-                    color="1Y_Return_Pct",
+                    color="RS_Score",
                     title="當前全市場 RS 相對強度分數前 15 名領跑者",
-                    labels={"symbol": "股票代碼", "RS_Score": "RS 分數 (越高越強)", "1Y_Return_Pct": "1年累積漲幅 (%)"},
-                    color_continuous_scale=px.colors.sequential.Viridis,
-                    hover_data=["name", "price", "industry"]
+                    labels={"symbol": "股票代碼", "RS_Score": "RS 分數 (越高越強)"},
+                    color_continuous_scale=px.colors.sequential.Blues,
+                    hover_data=["price", "industry"]
                 )
-                fig_bar.update_layout(xaxis_tickangle=-45)
+                fig_bar.update_layout(
+                    xaxis_tickangle=-45,
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font_color='#F3F4F6'
+                )
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
             with tab2:
@@ -459,7 +498,11 @@ else:
                         values='強勢股數量 (RS>=80)',
                         names='行業分類',
                         title="高強度股票 (RS Rating 80+) 的行業與版塊分佈",
-                        color_discrete_sequence=px.colors.qualitative.Pastel
+                        color_discrete_sequence=px.colors.qualitative.Safe
+                    )
+                    fig_pie.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        font_color='#F3F4F6'
                     )
                     st.plotly_chart(fig_pie, use_container_width=True)
 
@@ -472,7 +515,6 @@ else:
             if selected_ticker:
                 st.markdown(f"### 🏷️ 股票資訊：{selected_ticker}")
                 
-                # 實時報價區
                 realtime_data = None
                 if alpaca_client:
                     with st.spinner("⚡ 正在透過 Alpaca 連接實時報價..."):
@@ -515,16 +557,21 @@ else:
                         labels={"x": "日期", "y": "收盤價 (USD)"}
                     )
                     fig_line.update_traces(line_color="#2563EB", line_width=2)
+                    fig_line.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font_color='#F3F4F6'
+                    )
                     st.plotly_chart(fig_line, use_container_width=True)
                 else:
                     st.warning("無該股之詳細歷史價格。")
                     
 # 說明欄
 st.markdown("""
-<div style="background-color: #EFF6FF; padding: 1.5rem; border-radius: 10px; margin-top: 2rem;">
-    <h4>💡 什麼是 RS (Relative Strength) 相對強度分數？</h4>
-    <p>本系統使用之 RS 分數為模擬 <b>William O'Neil (威廉·歐尼爾)</b> 創立之 MarketSmith/IBD 的 RS Rating。它將個股與<b>全市場大於指定市值、有成交量股票</b>的 1 年回報進行加權對比排名。</p>
-    <ul>
+<div style="background-color: #111827; padding: 1.5rem; border-radius: 10px; margin-top: 2rem; border: 1px solid #1F2937;">
+    <h4 style="color: #3B82F6;">💡 什麼是 RS (Relative Strength) 相對強度分數？</h4>
+    <p style="color: #D1D5DB;">本系統使用之 RS 分數為模擬 <b>William O'Neil (威廉·歐尼爾)</b> 創立之 MarketSmith/IBD 的 RS Rating。它將個股與<b>全市場大於指定市值、有成交量股票</b>的 1 年回報進行加權對比排名。</p>
+    <ul style="color: #D1D5DB;">
         <li><b>加權分配</b>：近 3 個月表現佔 <b>40%</b>，其餘三個季度各佔 <b>20%</b>。這能更敏感地捕捉近期爆發的超級強勢領頭羊。</li>
         <li><b>評分區間 (1 - 99)</b>：分數為百分位排名。例如 <b>RS 95</b> 代表該股在過去一年的加權回報率優於市場上 <b>95%</b> 的股票。</li>
     </ul>
